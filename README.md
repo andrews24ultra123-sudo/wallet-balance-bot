@@ -32,7 +32,7 @@ XRP note: balances are reported as spendable, i.e. total minus the XRPL reserve 
 ```
 cp config.example.yaml config.yaml
 ```
-Fill in `allowed_chat_id`, the wallet addresses and thresholds. For local testing you can put the token in `config.yaml`; on the server use the environment variable instead.
+Fill in `allowed_chat_id`, the wallet addresses and thresholds. Paste the bot token into a `.env` file next to `config.yaml` (`TELEGRAM_BOT_TOKEN=...`); the bot reads it automatically. On the server the systemd unit's `/etc/wallet-bot.env` takes precedence.
 
 ### 3. Test locally
 ```
