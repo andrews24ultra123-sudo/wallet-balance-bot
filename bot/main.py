@@ -40,12 +40,18 @@ def short_addr(address):
 
 def wallet_line(wallet, balance, show_amounts):
     status = "LOW" if balance < wallet["threshold"] else "OK"
-    if show_amounts:
-        return (
-            f"[{status}] {wallet['label']} ({wallet['asset']} {short_addr(wallet['address'])}): "
-            f"{fmt_amount(balance)} {wallet['asset']} (threshold {fmt_amount(wallet['threshold'])})"
-        )
-    return f"[{status}] {wallet['label']} ({wallet['asset']} {short_addr(wallet['address'])})"
+    if not show_amounts:
+        return f"[{status}] {wallet['label']} ({wallet['asset']} {short_addr(wallet['address'])})"
+    asset = wallet["asset"]
+    line = (
+        f"[{status}] {wallet['label']} ({asset} {short_addr(wallet['address'])}): "
+        f"{fmt_amount(balance)} {asset} (threshold {fmt_amount(wallet['threshold'])})"
+    )
+    if status == "LOW" and wallet.get("target"):
+        topup = wallet["target"] - balance
+        if topup > 0:
+            line += f"\nTop up: {fmt_amount(topup)} {asset} (target {fmt_amount(wallet['target'])} {asset})"
+    return line
 
 
 # ---------------------------------------------------------------------------

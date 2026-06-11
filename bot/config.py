@@ -59,11 +59,18 @@ def load_config(path):
             threshold = Decimal(str(threshold))
         except InvalidOperation:
             raise ConfigError(f"Threshold for '{label}' is not a number: {threshold}")
+        target = w.get("target")
+        if target is not None:
+            try:
+                target = Decimal(str(target))
+            except InvalidOperation:
+                raise ConfigError(f"Target for '{label}' is not a number: {target}")
         parsed.append({
             "label": label,
             "asset": asset,
             "address": address,
             "threshold": threshold,
+            "target": target,
         })
     cfg["wallets"] = parsed
     return cfg
