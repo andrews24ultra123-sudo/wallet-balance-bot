@@ -56,51 +56,23 @@ def _tags_line(tags):
     return " ".join(tags) if tags else None
 
 
-def build_alert(wallet, balance, tags=None):
-    asset = wallet["asset"]
-    label = _html.escape(wallet["label"])
-    lines = [
-        f"<b>LOW BALANCE</b> — {label}",
-        "",
-        f"Balance:   {fmt_amount(balance)} {asset}",
-        f"Threshold: {fmt_amount(wallet['threshold'])} {asset}",
-    ]
-    topup = _topup_line(wallet, balance)
-    if topup:
-        lines.append(topup)
-    lines += ["", "Reminder sent each hour until recovered."]
+def build_low_alert(low_wallets, tags=None):
+    """Combined alert for one or more wallets below threshold."""
+    lines = ["<b>LOW BALANCE</b>", ""]
+    for wallet, balance in low_wallets:
+        asset = wallet["asset"]
+        label = _html.escape(wallet["label"])
+        lines.append(f"{label}")
+        lines.append(f"Balance:   {fmt_amount(balance)} {asset}")
+        lines.append(f"Threshold: {fmt_amount(wallet['threshold'])} {asset}")
+        topup = _topup_line(wallet, balance)
+        if topup:
+            lines.append(topup)
+        lines.append("")
     tag_line = _tags_line(tags)
     if tag_line:
-        lines += ["", tag_line]
-    return "\n".join(lines)
-
-
-def build_reminder(wallet, balance, tags=None):
-    asset = wallet["asset"]
-    label = _html.escape(wallet["label"])
-    lines = [
-        f"<b>Reminder</b> — {label} still low",
-        "",
-        f"Balance: {fmt_amount(balance)} {asset}",
-    ]
-    topup = _topup_line(wallet, balance)
-    if topup:
-        lines.append(topup)
-    tag_line = _tags_line(tags)
-    if tag_line:
-        lines += ["", tag_line]
-    return "\n".join(lines)
-
-
-def build_recovery(wallet, balance):
-    asset = wallet["asset"]
-    label = _html.escape(wallet["label"])
-    return (
-        f"<b>Recovered</b> — {label}\n\n"
-        f"Balance {fmt_amount(balance)} {asset} is back above "
-        f"threshold ({fmt_amount(wallet['threshold'])} {asset}). "
-        "Reminders stopped."
-    )
+        lines.append(tag_line)
+    return "\n".join(lines).rstrip()
 
 
 def build_scan(results, title="Wallet balances"):
@@ -125,7 +97,7 @@ def build_scan(results, title="Wallet balances"):
 
 
 # ---------------------------------------------------------------------------
-# Persistent alert state
+# Persistent state (fetch failure tracking and heartbeat date only)
 
 
 def load_state(path):
@@ -143,9 +115,7 @@ def save_state(path, state):
 
 
 def wallet_state(state, label):
-    return state.setdefault(
-        label, {"status": "OK", "fetch_failures": 0, "degraded_alerted": False}
-    )
+    return state.setdefault(label, {"fetch_failures": 0, "degraded_alerted": False})
 
 
 # ---------------------------------------------------------------------------
@@ -179,9 +149,7 @@ class WalletBot:
         self.cfg = cfg
         self.state_path = state_path
         self.state = load_state(state_path)
-        self.tick_count = 0
         self.chat_id = cfg["allowed_chat_id"]
-        self.startup = True
 
     async def send(self, bot, text):
         for chat_id in self.cfg["allowed_chat_ids"]:
@@ -194,49 +162,45 @@ class WalletBot:
             fetchers.get_balance, wallet["asset"], wallet["address"]
         )
 
-    async def check_wallet(self, bot, wallet):
-        ws = wallet_state(self.state, wallet["label"])
-        try:
-            balance = await self.fetch(wallet)
-        except fetchers.FetchError as exc:
-            ws["fetch_failures"] += 1
-            logger.warning("Fetch failed (%s consecutive): %s", ws["fetch_failures"], exc)
-            if ws["fetch_failures"] >= 2 and not ws["degraded_alerted"]:
-                ws["degraded_alerted"] = True
+    async def tick(self, context):
+        bot = context.bot
+        low = []
+
+        for wallet in self.cfg["wallets"]:
+            ws = wallet_state(self.state, wallet["label"])
+            try:
+                balance = await self.fetch(wallet)
+            except fetchers.FetchError as exc:
+                ws["fetch_failures"] += 1
+                logger.warning("Fetch failed (%s consecutive): %s", ws["fetch_failures"], exc)
+                if ws["fetch_failures"] >= 2 and not ws["degraded_alerted"]:
+                    ws["degraded_alerted"] = True
+                    label = _html.escape(wallet["label"])
+                    await self.send(
+                        bot,
+                        f"<b>Monitoring degraded</b> — {label}\n\n"
+                        f"Could not read balance after {ws['fetch_failures']} attempts. "
+                        "Balance alerts for this wallet are unreliable until this recovers.",
+                    )
+                continue
+
+            if ws["degraded_alerted"]:
                 label = _html.escape(wallet["label"])
-                await self.send(
-                    bot,
-                    f"<b>Monitoring degraded</b> — {label}\n\n"
-                    f"Could not read balance after {ws['fetch_failures']} attempts. "
-                    "Balance alerts for this wallet are unreliable until this recovers.",
-                )
-            return
+                await self.send(bot, f"<b>Monitoring restored</b> — {label}")
+            ws["fetch_failures"] = 0
+            ws["degraded_alerted"] = False
 
-        if ws["degraded_alerted"]:
-            label = _html.escape(wallet["label"])
-            await self.send(bot, f"<b>Monitoring restored</b> — {label}")
-        ws["fetch_failures"] = 0
-        ws["degraded_alerted"] = False
-
-        below = balance < wallet["threshold"]
+            if balance < wallet["threshold"]:
+                low.append((wallet, balance))
 
         tags = self.cfg.get("alert_tags") or []
-        if below and ws["status"] == "OK":
-            ws["status"] = "LOW"
-            await self.send(bot, build_alert(wallet, balance, tags))
-        elif below and ws["status"] == "LOW" and not self.startup:
-            await self.send(bot, build_reminder(wallet, balance, tags))
-        elif not below and ws["status"] == "LOW":
-            ws["status"] = "OK"
-            await self.send(bot, build_recovery(wallet, balance))
+        if low:
+            await self.send(bot, build_low_alert(low, tags))
+        else:
+            await self.send(bot, "<b>All wallets above threshold.</b>")
 
-    async def tick(self, context):
-        for wallet in self.cfg["wallets"]:
-            await self.check_wallet(context.bot, wallet)
-
-        await self.maybe_heartbeat(context.bot)
+        await self.maybe_heartbeat(bot)
         save_state(self.state_path, self.state)
-        self.startup = False
 
     async def maybe_heartbeat(self, bot):
         hb = self.cfg["heartbeat"]
@@ -316,14 +280,14 @@ class WalletBot:
         )
 
     async def cmd_help(self, update, context):
-        intervals = self.cfg["intervals"]
         await update.message.reply_text(
             "<b>Wallet balance bot</b>\n\n"
             "/balances — scan all wallets now\n"
             "/thresholds — show thresholds and targets\n"
             "/setthreshold &lt;asset or label&gt; &lt;amount&gt; — change a threshold\n"
             "/help — this message\n\n"
-            "Checks every hour on the hour. Reminder sent each hour while a balance is low.",
+            "Checks every hour on the hour. Alerts with @tags if any balance is low; "
+            "brief all-clear if all are above threshold.",
             parse_mode=ParseMode.HTML,
         )
 
