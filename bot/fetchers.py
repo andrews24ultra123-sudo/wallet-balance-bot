@@ -1,8 +1,8 @@
 """Read-only balance lookups against free public APIs.
 
 Each asset has a primary and a fallback endpoint. All amounts are returned
-as Decimal in the asset's main unit (BTC, ETH, SOL, XRP, LTC), never floats.
-No API keys are used anywhere.
+as Decimal in the asset's main unit (BTC, ETH, SOL, XRP, LTC, USDC, USDT),
+never floats. No API keys are used anywhere.
 """
 
 from decimal import Decimal
@@ -123,12 +123,53 @@ def _xrp_ripple_s1(address):
     return _xrp_rpc("https://s1.ripple.com:51234", address)
 
 
+# ERC-20 token contracts on Ethereum mainnet
+_ERC20_CONTRACTS = {
+    "USDC": ("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", 6),
+    "USDT": ("0xdAC17F958D2ee523a2206206994597C13D831ec7", 6),
+}
+
+# balanceOf(address) selector
+_BALANCE_OF_SELECTOR = "0x70a08231"
+
+
+def _erc20_rpc(rpc_url, token_contract, wallet_address, decimals):
+    padded = wallet_address[2:].lower().zfill(64)
+    data = _BALANCE_OF_SELECTOR + padded
+    result = _post_json(rpc_url, {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "eth_call",
+        "params": [{"to": token_contract, "data": data}, "latest"],
+    })
+    raw = result.get("result", "0x")
+    if not raw or raw == "0x":
+        raise FetchError(f"ERC-20 balanceOf returned empty from {rpc_url}")
+    return Decimal(int(raw, 16)) / Decimal(10 ** decimals)
+
+
+def _make_erc20_fetchers(symbol):
+    contract, decimals = _ERC20_CONTRACTS[symbol]
+
+    def _primary(address):
+        return _erc20_rpc("https://cloudflare-eth.com", contract, address, decimals)
+
+    def _fallback(address):
+        return _erc20_rpc("https://ethereum-rpc.publicnode.com", contract, address, decimals)
+
+    _primary.__name__ = f"_{symbol.lower()}_cloudflare"
+    _fallback.__name__ = f"_{symbol.lower()}_publicnode"
+    return [_primary, _fallback]
+
+
 FETCHERS = {
     "BTC": [_btc_mempool_space, _btc_blockstream],
     "ETH": [_eth_cloudflare, _eth_publicnode],
     "SOL": [_sol_mainnet, _sol_publicnode],
     "XRP": [_xrp_cluster, _xrp_ripple_s1],
     "LTC": [_ltc_litecoinspace, _ltc_blockcypher],
+    "USDC": _make_erc20_fetchers("USDC"),
+    "USDT": _make_erc20_fetchers("USDT"),
 }
 
 SUPPORTED_ASSETS = sorted(FETCHERS)
