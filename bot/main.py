@@ -344,7 +344,7 @@ def run_bot(cfg, state_path):
         .build()
     )
 
-    only_andrew = filters.Chat(chat_id=cfg["allowed_chat_id"])
+    only_andrew = filters.Chat(chat_id=cfg["allowed_chat_ids"])
     app.add_handler(CommandHandler("balances", bot.cmd_balances, filters=only_andrew))
     app.add_handler(CommandHandler("thresholds", bot.cmd_thresholds, filters=only_andrew))
     app.add_handler(CommandHandler("setthreshold", bot.cmd_setthreshold, filters=only_andrew))

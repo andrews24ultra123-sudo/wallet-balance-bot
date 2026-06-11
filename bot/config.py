@@ -36,7 +36,13 @@ def load_config(path):
 
     telegram = raw.get("telegram") or {}
     cfg["telegram_token"] = os.environ.get("TELEGRAM_BOT_TOKEN") or telegram.get("token")
-    cfg["allowed_chat_id"] = telegram.get("allowed_chat_id")
+    raw_id = telegram.get("allowed_chat_id")
+    if isinstance(raw_id, list):
+        cfg["allowed_chat_ids"] = [int(x) for x in raw_id]
+    else:
+        cfg["allowed_chat_ids"] = [int(raw_id)] if raw_id is not None else []
+    # First entry is the primary chat for proactive alerts and heartbeat.
+    cfg["allowed_chat_id"] = cfg["allowed_chat_ids"][0] if cfg["allowed_chat_ids"] else None
 
     wallets = raw.get("wallets") or []
     if not wallets:
