@@ -173,9 +173,10 @@ class WalletBot:
         self.chat_id = cfg["allowed_chat_id"]
 
     async def send(self, bot, text):
-        await bot.send_message(
-            chat_id=self.chat_id, text=text, parse_mode=ParseMode.HTML
-        )
+        for chat_id in self.cfg["allowed_chat_ids"]:
+            await bot.send_message(
+                chat_id=chat_id, text=text, parse_mode=ParseMode.HTML
+            )
 
     async def fetch(self, wallet):
         return await asyncio.to_thread(
