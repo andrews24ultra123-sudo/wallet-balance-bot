@@ -10,12 +10,15 @@ Usage:
 
 import argparse
 import asyncio
+import html as _html
 import json
 import logging
 import os
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from zoneinfo import ZoneInfo
+
+from telegram.constants import ParseMode
 
 from . import fetchers
 from .config import ConfigError, find_wallets, load_config, save_threshold
@@ -26,7 +29,9 @@ STATE_FILE = "state.json"
 
 
 def fmt_amount(value):
-    text = format(value.normalize(), "f")
+    """Format a Decimal for display: max 4 decimal places, trailing zeros stripped."""
+    rounded = round(value, 4)
+    text = format(rounded, "f")
     if "." in text:
         text = text.rstrip("0").rstrip(".")
     return text
@@ -35,23 +40,78 @@ def fmt_amount(value):
 def short_addr(address):
     if len(address) <= 14:
         return address
-    return f"{address[:7]}...{address[-5:]}"
+    return f"{address[:6]}...{address[-4:]}"
 
 
-def wallet_line(wallet, balance, show_amounts):
-    status = "LOW" if balance < wallet["threshold"] else "OK"
-    if not show_amounts:
-        return f"[{status}] {wallet['label']} ({wallet['asset']} {short_addr(wallet['address'])})"
-    asset = wallet["asset"]
-    line = (
-        f"[{status}] {wallet['label']} ({asset} {short_addr(wallet['address'])}): "
-        f"{fmt_amount(balance)} {asset} (threshold {fmt_amount(wallet['threshold'])})"
-    )
-    if status == "LOW" and wallet.get("target"):
+def _topup_line(wallet, balance):
+    if wallet.get("target"):
         topup = wallet["target"] - balance
         if topup > 0:
-            line += f"\nTop up: {fmt_amount(topup)} {asset} (target {fmt_amount(wallet['target'])} {asset})"
-    return line
+            asset = wallet["asset"]
+            return f"Top up:    {fmt_amount(topup)} {asset}  (target {fmt_amount(wallet['target'])} {asset})"
+    return None
+
+
+def build_alert(wallet, balance, reminder_min):
+    asset = wallet["asset"]
+    label = _html.escape(wallet["label"])
+    lines = [
+        f"<b>LOW BALANCE</b> — {label}",
+        "",
+        f"Balance:   {fmt_amount(balance)} {asset}",
+        f"Threshold: {fmt_amount(wallet['threshold'])} {asset}",
+    ]
+    topup = _topup_line(wallet, balance)
+    if topup:
+        lines.append(topup)
+    lines += ["", f"Reminders every {reminder_min} min until recovered."]
+    return "\n".join(lines)
+
+
+def build_reminder(wallet, balance):
+    asset = wallet["asset"]
+    label = _html.escape(wallet["label"])
+    lines = [
+        f"<b>Reminder</b> — {label} still low",
+        "",
+        f"Balance: {fmt_amount(balance)} {asset}",
+    ]
+    topup = _topup_line(wallet, balance)
+    if topup:
+        lines.append(topup)
+    return "\n".join(lines)
+
+
+def build_recovery(wallet, balance):
+    asset = wallet["asset"]
+    label = _html.escape(wallet["label"])
+    return (
+        f"<b>Recovered</b> — {label}\n\n"
+        f"Balance {fmt_amount(balance)} {asset} is back above "
+        f"threshold ({fmt_amount(wallet['threshold'])} {asset}). "
+        "Reminders stopped."
+    )
+
+
+def build_scan(results, title="Wallet balances"):
+    """results: list of (wallet, balance_or_None, error_or_None)"""
+    lines = [f"<b>{_html.escape(title)}</b>", ""]
+    topups = []
+    for wallet, balance, error in results:
+        asset = wallet["asset"]
+        label = _html.escape(wallet["label"])
+        if error:
+            lines.append(f"{label}: fetch failed")
+            continue
+        status = "LOW" if balance < wallet["threshold"] else "OK"
+        lines.append(f"{label}:  {fmt_amount(balance)} {asset}  [{status}]")
+        if status == "LOW":
+            tu = _topup_line(wallet, balance)
+            if tu:
+                topups.append(f"  {label}: {tu.split(':', 1)[1].strip()}")
+    if topups:
+        lines += ["", "<b>Top ups needed:</b>"] + topups
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -87,10 +147,16 @@ def run_check(cfg):
     for wallet in cfg["wallets"]:
         try:
             balance = fetchers.get_balance(wallet["asset"], wallet["address"])
-            print(wallet_line(wallet, balance, show_amounts=True))
+            asset = wallet["asset"]
+            status = "LOW" if balance < wallet["threshold"] else "OK "
+            line = f"[{status}] {wallet['label']}: {fmt_amount(balance)} {asset}  (threshold {fmt_amount(wallet['threshold'])})"
+            tu = _topup_line(wallet, balance)
+            if tu and status.strip() == "LOW":
+                line += f"\n       {tu}"
+            print(line)
         except fetchers.FetchError as exc:
             failures += 1
-            print(f"[FETCH FAILED] {wallet['label']}: {exc}")
+            print(f"[FAIL] {wallet['label']}: {exc}")
     return 1 if failures else 0
 
 
@@ -107,7 +173,9 @@ class WalletBot:
         self.chat_id = cfg["allowed_chat_id"]
 
     async def send(self, bot, text):
-        await bot.send_message(chat_id=self.chat_id, text=text)
+        await bot.send_message(
+            chat_id=self.chat_id, text=text, parse_mode=ParseMode.HTML
+        )
 
     async def fetch(self, wallet):
         return await asyncio.to_thread(
@@ -116,7 +184,7 @@ class WalletBot:
 
     async def check_wallet(self, bot, wallet):
         ws = wallet_state(self.state, wallet["label"])
-        show = self.cfg["show_amounts"]
+        reminder_min = self.cfg["intervals"]["reminder_minutes"]
         try:
             balance = await self.fetch(wallet)
         except fetchers.FetchError as exc:
@@ -124,38 +192,31 @@ class WalletBot:
             logger.warning("Fetch failed (%s consecutive): %s", ws["fetch_failures"], exc)
             if ws["fetch_failures"] >= 2 and not ws["degraded_alerted"]:
                 ws["degraded_alerted"] = True
+                label = _html.escape(wallet["label"])
                 await self.send(
                     bot,
-                    f"MONITORING DEGRADED: cannot read balance for {wallet['label']} "
-                    f"({wallet['asset']}) after {ws['fetch_failures']} consecutive attempts. "
+                    f"<b>Monitoring degraded</b> — {label}\n\n"
+                    f"Could not read balance after {ws['fetch_failures']} attempts. "
                     "Balance alerts for this wallet are unreliable until this recovers.",
                 )
             return
 
         if ws["degraded_alerted"]:
-            await self.send(
-                bot, f"Monitoring recovered for {wallet['label']} ({wallet['asset']})."
-            )
+            label = _html.escape(wallet["label"])
+            await self.send(bot, f"<b>Monitoring restored</b> — {label}")
         ws["fetch_failures"] = 0
         ws["degraded_alerted"] = False
 
         below = balance < wallet["threshold"]
-        line = wallet_line(wallet, balance, show)
-        reminder_min = self.cfg["intervals"]["reminder_minutes"]
 
         if below and ws["status"] == "OK":
             ws["status"] = "LOW"
-            await self.send(
-                bot,
-                "LOW BALANCE ALERT\n"
-                f"{line}\n"
-                f"Top-up needed. Reminders every {reminder_min} minutes until it is back above threshold.",
-            )
+            await self.send(bot, build_alert(wallet, balance, reminder_min))
         elif below and ws["status"] == "LOW":
-            await self.send(bot, f"Reminder, still low:\n{line}")
+            await self.send(bot, build_reminder(wallet, balance))
         elif not below and ws["status"] == "LOW":
             ws["status"] = "OK"
-            await self.send(bot, f"RECOVERED, reminders stopped:\n{line}")
+            await self.send(bot, build_recovery(wallet, balance))
 
     async def tick(self, context):
         intervals = self.cfg["intervals"]
@@ -183,76 +244,87 @@ class WalletBot:
         already_sent = self.state.get("_last_heartbeat") == now.date().isoformat()
         if due and not already_sent:
             self.state["_last_heartbeat"] = now.date().isoformat()
-            await self.send(bot, "Daily heartbeat.\n" + await self.scan_text())
+            date_str = now.strftime("%d %b %Y")
+            await self.send(bot, await self.scan_text(title=f"Daily heartbeat — {date_str}"))
 
-    async def scan_text(self):
-        lines = []
+    async def scan_text(self, title="Wallet balances"):
+        results = []
         for wallet in self.cfg["wallets"]:
             try:
                 balance = await self.fetch(wallet)
-                lines.append(wallet_line(wallet, balance, self.cfg["show_amounts"]))
-            except fetchers.FetchError:
-                lines.append(f"[FETCH FAILED] {wallet['label']} ({wallet['asset']})")
-        return "\n".join(lines)
+                results.append((wallet, balance, None))
+            except fetchers.FetchError as exc:
+                results.append((wallet, None, exc))
+        return build_scan(results, title=title)
 
     # -- command handlers ---------------------------------------------------
 
     async def cmd_balances(self, update, context):
-        await update.message.reply_text("Scanning...")
-        await update.message.reply_text(await self.scan_text())
+        await update.message.reply_text("Scanning...", parse_mode=ParseMode.HTML)
+        await update.message.reply_text(
+            await self.scan_text(), parse_mode=ParseMode.HTML
+        )
 
     async def cmd_thresholds(self, update, context):
-        lines = [
-            f"{w['label']} ({w['asset']}): {fmt_amount(w['threshold'])} {w['asset']}"
-            for w in self.cfg["wallets"]
-        ]
-        await update.message.reply_text("Current thresholds:\n" + "\n".join(lines))
+        lines = ["<b>Thresholds</b>", ""]
+        for w in self.cfg["wallets"]:
+            asset = w["asset"]
+            label = _html.escape(w["label"])
+            target = f"  →  target {fmt_amount(w['target'])} {asset}" if w.get("target") else ""
+            lines.append(f"{label}:  {fmt_amount(w['threshold'])} {asset}{target}")
+        await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
 
     async def cmd_setthreshold(self, update, context):
         args = context.args or []
         if len(args) < 2:
             await update.message.reply_text(
-                "Usage: /setthreshold <asset or label> <amount>\n"
-                "Example: /setthreshold ETH 0.5"
+                "Usage: /setthreshold &lt;asset or label&gt; &lt;amount&gt;\n"
+                "Example: /setthreshold ETH 24",
+                parse_mode=ParseMode.HTML,
             )
             return
         key, raw_amount = " ".join(args[:-1]), args[-1]
         try:
             amount = Decimal(raw_amount)
         except InvalidOperation:
-            await update.message.reply_text(f"'{raw_amount}' is not a number.")
+            await update.message.reply_text(f"'{_html.escape(raw_amount)}' is not a number.", parse_mode=ParseMode.HTML)
             return
         matches = find_wallets(self.cfg, key)
         if not matches:
-            await update.message.reply_text(f"No wallet matches '{key}'. See /thresholds.")
+            await update.message.reply_text(f"No wallet matches '{_html.escape(key)}'. See /thresholds.", parse_mode=ParseMode.HTML)
             return
         if len(matches) > 1:
-            labels = ", ".join(w["label"] for w in matches)
+            labels = ", ".join(_html.escape(w["label"]) for w in matches)
             await update.message.reply_text(
-                f"'{key}' matches several wallets ({labels}). Use the exact label."
+                f"'{_html.escape(key)}' matches several wallets ({labels}). Use the exact label.",
+                parse_mode=ParseMode.HTML,
             )
             return
         wallet = matches[0]
         save_threshold(self.cfg, wallet["label"], amount)
+        asset = wallet["asset"]
+        label = _html.escape(wallet["label"])
         await update.message.reply_text(
-            f"Threshold for {wallet['label']} ({wallet['asset']}) set to "
-            f"{fmt_amount(amount)} {wallet['asset']}. Takes effect from the next check."
+            f"Threshold updated — {label}\n"
+            f"New threshold: {fmt_amount(amount)} {asset}",
+            parse_mode=ParseMode.HTML,
         )
 
     async def cmd_help(self, update, context):
         intervals = self.cfg["intervals"]
         await update.message.reply_text(
-            "Wallet balance bot (read-only monitoring).\n\n"
-            "/balances - scan all wallets now\n"
-            "/thresholds - show current thresholds\n"
-            "/setthreshold <asset or label> <amount> - change a threshold\n"
-            "/help - this message\n\n"
-            f"Automatic checks every {intervals['check_minutes']} min; reminders every "
-            f"{intervals['reminder_minutes']} min while a balance is low."
+            "<b>Wallet balance bot</b>\n\n"
+            "/balances — scan all wallets now\n"
+            "/thresholds — show thresholds and targets\n"
+            "/setthreshold &lt;asset or label&gt; &lt;amount&gt; — change a threshold\n"
+            "/help — this message\n\n"
+            f"Checks every {intervals['check_minutes']} min. "
+            f"Reminders every {intervals['reminder_minutes']} min while a balance is low.",
+            parse_mode=ParseMode.HTML,
         )
 
     async def on_startup(self, app):
-        await self.send(app.bot, "Wallet balance bot online. /help for commands.")
+        await self.send(app.bot, "<b>Wallet balance bot online.</b> /help for commands.")
 
 
 def run_bot(cfg, state_path):
@@ -290,11 +362,7 @@ def run_bot(cfg, state_path):
 
 
 def load_env_file(path):
-    """Load KEY=VALUE lines from a .env file next to the config, if present.
-
-    Existing environment variables win, so the systemd EnvironmentFile still
-    takes precedence on the server.
-    """
+    """Load KEY=VALUE lines from a .env file next to the config, if present."""
     if not os.path.exists(path):
         return
     with open(path) as fh:
