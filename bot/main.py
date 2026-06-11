@@ -181,6 +181,7 @@ class WalletBot:
         self.state = load_state(state_path)
         self.tick_count = 0
         self.chat_id = cfg["allowed_chat_id"]
+        self.startup = True
 
     async def send(self, bot, text):
         for chat_id in self.cfg["allowed_chat_ids"]:
@@ -224,7 +225,7 @@ class WalletBot:
         if below and ws["status"] == "OK":
             ws["status"] = "LOW"
             await self.send(bot, build_alert(wallet, balance, reminder_min, tags))
-        elif below and ws["status"] == "LOW":
+        elif below and ws["status"] == "LOW" and not self.startup:
             await self.send(bot, build_reminder(wallet, balance, tags))
         elif not below and ws["status"] == "LOW":
             ws["status"] = "OK"
@@ -244,6 +245,7 @@ class WalletBot:
 
         await self.maybe_heartbeat(context.bot)
         save_state(self.state_path, self.state)
+        self.startup = False
 
     async def maybe_heartbeat(self, bot):
         hb = self.cfg["heartbeat"]
