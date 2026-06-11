@@ -14,7 +14,7 @@ import html as _html
 import json
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from zoneinfo import ZoneInfo
 
@@ -56,7 +56,7 @@ def _tags_line(tags):
     return " ".join(tags) if tags else None
 
 
-def build_alert(wallet, balance, reminder_min, tags=None):
+def build_alert(wallet, balance, tags=None):
     asset = wallet["asset"]
     label = _html.escape(wallet["label"])
     lines = [
@@ -68,7 +68,7 @@ def build_alert(wallet, balance, reminder_min, tags=None):
     topup = _topup_line(wallet, balance)
     if topup:
         lines.append(topup)
-    lines += ["", f"Reminders every {reminder_min} min until recovered."]
+    lines += ["", "Reminder sent each hour until recovered."]
     tag_line = _tags_line(tags)
     if tag_line:
         lines += ["", tag_line]
@@ -196,7 +196,6 @@ class WalletBot:
 
     async def check_wallet(self, bot, wallet):
         ws = wallet_state(self.state, wallet["label"])
-        reminder_min = self.cfg["intervals"]["reminder_minutes"]
         try:
             balance = await self.fetch(wallet)
         except fetchers.FetchError as exc:
@@ -224,7 +223,7 @@ class WalletBot:
         tags = self.cfg.get("alert_tags") or []
         if below and ws["status"] == "OK":
             ws["status"] = "LOW"
-            await self.send(bot, build_alert(wallet, balance, reminder_min, tags))
+            await self.send(bot, build_alert(wallet, balance, tags))
         elif below and ws["status"] == "LOW" and not self.startup:
             await self.send(bot, build_reminder(wallet, balance, tags))
         elif not below and ws["status"] == "LOW":
@@ -232,16 +231,8 @@ class WalletBot:
             await self.send(bot, build_recovery(wallet, balance))
 
     async def tick(self, context):
-        intervals = self.cfg["intervals"]
-        ticks_per_full = max(1, intervals["check_minutes"] // intervals["reminder_minutes"])
-        full_scan = self.tick_count % ticks_per_full == 0
-        self.tick_count += 1
-
         for wallet in self.cfg["wallets"]:
-            ws = wallet_state(self.state, wallet["label"])
-            needs_attention = ws["status"] == "LOW" or ws["fetch_failures"] > 0
-            if full_scan or needs_attention:
-                await self.check_wallet(context.bot, wallet)
+            await self.check_wallet(context.bot, wallet)
 
         await self.maybe_heartbeat(context.bot)
         save_state(self.state_path, self.state)
@@ -332,8 +323,7 @@ class WalletBot:
             "/thresholds — show thresholds and targets\n"
             "/setthreshold &lt;asset or label&gt; &lt;amount&gt; — change a threshold\n"
             "/help — this message\n\n"
-            f"Checks every {intervals['check_minutes']} min. "
-            f"Reminders every {intervals['reminder_minutes']} min while a balance is low.",
+            "Checks every hour on the hour. Reminder sent each hour while a balance is low.",
             parse_mode=ParseMode.HTML,
         )
 
@@ -365,10 +355,13 @@ def run_bot(cfg, state_path):
     app.add_handler(CommandHandler("help", bot.cmd_help, filters=only_andrew))
     app.add_handler(CommandHandler("start", bot.cmd_help, filters=only_andrew))
 
+    now = datetime.now(timezone.utc)
+    seconds_past_hour = now.minute * 60 + now.second + now.microsecond / 1_000_000
+    seconds_to_next_hour = 3600 - seconds_past_hour
     app.job_queue.run_repeating(
         bot.tick,
-        interval=cfg["intervals"]["reminder_minutes"] * 60,
-        first=5,
+        interval=3600,
+        first=seconds_to_next_hour,
     )
 
     logger.info("Starting bot: %d wallets, chat %s", len(cfg["wallets"]), cfg["allowed_chat_id"])
