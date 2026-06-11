@@ -1,0 +1,26 @@
+# systemd unit for the wallet balance bot.
+# Install:
+#   sudo cp deploy/wallet-bot.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now wallet-bot
+# Logs:
+#   journalctl -u wallet-bot -f
+
+[Unit]
+Description=Wallet balance Telegram bot (read-only monitoring)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=walletbot
+WorkingDirectory=/opt/wallet-balance-bot
+# /etc/wallet-bot.env contains one line: TELEGRAM_BOT_TOKEN=123456:ABC...
+# chmod 600, owned by root. The token never lives in the git repo.
+EnvironmentFile=/etc/wallet-bot.env
+ExecStart=/opt/wallet-balance-bot/venv/bin/python -m bot.main --config /opt/wallet-balance-bot/config.yaml --state /opt/wallet-balance-bot/state.json
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

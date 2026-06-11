@@ -1,0 +1,45 @@
+# Copy to config.yaml and fill in. config.yaml is gitignored: it stays on the
+# machine running the bot and never goes into the repo.
+
+telegram:
+  # Prefer setting the token via the TELEGRAM_BOT_TOKEN environment variable
+  # (see deploy/wallet-bot.service). Only put it here for local testing.
+  # token: "123456:ABC..."
+  allowed_chat_id: 111111111   # your numeric Telegram chat id; the bot ignores everyone else
+
+intervals:
+  check_minutes: 30      # normal scan cadence
+  reminder_minutes: 10   # re-check + reminder cadence while a balance is low
+
+heartbeat:
+  enabled: true          # one daily message with all balances, proves the bot is alive
+  time: "09:00"
+  timezone: "Asia/Singapore"
+
+# Set to false to alert "below threshold" without exact amounts in Telegram.
+show_amounts: true
+
+# One entry per address to watch. Labels must be unique; thresholds are in the
+# asset's main unit (BTC, ETH, SOL, XRP, LTC). XRP balances are reported as
+# spendable (total minus the XRPL reserve).
+wallets:
+  - label: BTC hot wallet
+    asset: BTC
+    address: bc1q...
+    threshold: 0.5
+  - label: ETH hot wallet
+    asset: ETH
+    address: "0x..."
+    threshold: 5
+  - label: SOL hot wallet
+    asset: SOL
+    address: "..."
+    threshold: 50
+  - label: XRP hot wallet
+    asset: XRP
+    address: r...
+    threshold: 1000
+  - label: LTC hot wallet
+    asset: LTC
+    address: ltc1q...
+    threshold: 20
