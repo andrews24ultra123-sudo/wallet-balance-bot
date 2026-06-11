@@ -283,6 +283,23 @@ def run_bot(cfg, state_path):
     app.run_polling(allowed_updates=["message"])
 
 
+def load_env_file(path):
+    """Load KEY=VALUE lines from a .env file next to the config, if present.
+
+    Existing environment variables win, so the systemd EnvironmentFile still
+    takes precedence on the server.
+    """
+    if not os.path.exists(path):
+        return
+    with open(path) as fh:
+        for line in fh:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            os.environ.setdefault(key.strip(), value.strip().strip("'\""))
+
+
 def main():
     parser = argparse.ArgumentParser(description="Wallet balance Telegram bot")
     parser.add_argument("--config", default="config.yaml", help="path to config.yaml")
@@ -297,6 +314,7 @@ def main():
     )
     logging.getLogger("httpx").setLevel(logging.WARNING)
 
+    load_env_file(os.path.join(os.path.dirname(os.path.abspath(args.config)), ".env"))
     try:
         cfg = load_config(args.config)
     except ConfigError as exc:
