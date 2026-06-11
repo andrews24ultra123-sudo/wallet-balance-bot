@@ -52,7 +52,11 @@ def _topup_line(wallet, balance):
     return None
 
 
-def build_alert(wallet, balance, reminder_min):
+def _tags_line(tags):
+    return " ".join(tags) if tags else None
+
+
+def build_alert(wallet, balance, reminder_min, tags=None):
     asset = wallet["asset"]
     label = _html.escape(wallet["label"])
     lines = [
@@ -65,10 +69,13 @@ def build_alert(wallet, balance, reminder_min):
     if topup:
         lines.append(topup)
     lines += ["", f"Reminders every {reminder_min} min until recovered."]
+    tag_line = _tags_line(tags)
+    if tag_line:
+        lines += ["", tag_line]
     return "\n".join(lines)
 
 
-def build_reminder(wallet, balance):
+def build_reminder(wallet, balance, tags=None):
     asset = wallet["asset"]
     label = _html.escape(wallet["label"])
     lines = [
@@ -79,6 +86,9 @@ def build_reminder(wallet, balance):
     topup = _topup_line(wallet, balance)
     if topup:
         lines.append(topup)
+    tag_line = _tags_line(tags)
+    if tag_line:
+        lines += ["", tag_line]
     return "\n".join(lines)
 
 
@@ -210,11 +220,12 @@ class WalletBot:
 
         below = balance < wallet["threshold"]
 
+        tags = self.cfg.get("alert_tags") or []
         if below and ws["status"] == "OK":
             ws["status"] = "LOW"
-            await self.send(bot, build_alert(wallet, balance, reminder_min))
+            await self.send(bot, build_alert(wallet, balance, reminder_min, tags))
         elif below and ws["status"] == "LOW":
-            await self.send(bot, build_reminder(wallet, balance))
+            await self.send(bot, build_reminder(wallet, balance, tags))
         elif not below and ws["status"] == "LOW":
             ws["status"] = "OK"
             await self.send(bot, build_recovery(wallet, balance))

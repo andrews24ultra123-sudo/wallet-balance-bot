@@ -32,6 +32,7 @@ def load_config(path):
         "intervals": {**DEFAULTS["intervals"], **(raw.get("intervals") or {})},
         "heartbeat": {**DEFAULTS["heartbeat"], **(raw.get("heartbeat") or {})},
         "show_amounts": raw.get("show_amounts", DEFAULTS["show_amounts"]),
+        "alert_tags": raw.get("alert_tags") or [],
     }
 
     telegram = raw.get("telegram") or {}
