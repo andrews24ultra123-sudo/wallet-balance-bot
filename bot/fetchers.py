@@ -72,12 +72,12 @@ def _eth_rpc(url, address):
     return Decimal(int(data["result"], 16)) / Decimal(10**18)
 
 
-def _eth_cloudflare(address):
-    return _eth_rpc("https://cloudflare-eth.com", address)
-
-
 def _eth_publicnode(address):
     return _eth_rpc("https://ethereum-rpc.publicnode.com", address)
+
+
+def _eth_drpc(address):
+    return _eth_rpc("https://eth.drpc.org", address)
 
 
 def _sol_rpc(url, address):
@@ -152,19 +152,19 @@ def _make_erc20_fetchers(symbol):
     contract, decimals = _ERC20_CONTRACTS[symbol]
 
     def _primary(address):
-        return _erc20_rpc("https://cloudflare-eth.com", contract, address, decimals)
-
-    def _fallback(address):
         return _erc20_rpc("https://ethereum-rpc.publicnode.com", contract, address, decimals)
 
-    _primary.__name__ = f"_{symbol.lower()}_cloudflare"
-    _fallback.__name__ = f"_{symbol.lower()}_publicnode"
+    def _fallback(address):
+        return _erc20_rpc("https://eth.drpc.org", contract, address, decimals)
+
+    _primary.__name__ = f"_{symbol.lower()}_publicnode"
+    _fallback.__name__ = f"_{symbol.lower()}_drpc"
     return [_primary, _fallback]
 
 
 FETCHERS = {
     "BTC": [_btc_mempool_space, _btc_blockstream],
-    "ETH": [_eth_cloudflare, _eth_publicnode],
+    "ETH": [_eth_publicnode, _eth_drpc],
     "SOL": [_sol_mainnet, _sol_publicnode],
     "XRP": [_xrp_cluster, _xrp_ripple_s1],
     "LTC": [_ltc_litecoinspace, _ltc_blockcypher],
