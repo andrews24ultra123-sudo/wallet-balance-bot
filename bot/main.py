@@ -56,18 +56,22 @@ def _tags_line(tags):
     return " ".join(tags) if tags else None
 
 
-def build_low_alert(low_wallets, tags=None):
-    """Combined alert for one or more wallets below threshold."""
+def build_low_alert(low_wallets, tags=None, show_amounts=True):
+    """Combined alert for one or more wallets below threshold. Re-sent every
+    scan while any wallet stays low, so it keeps pinging until topped up."""
     lines = ["<b>LOW BALANCE</b>", ""]
     for wallet, balance in low_wallets:
         asset = wallet["asset"]
         label = _html.escape(wallet["label"])
         lines.append(f"{label}")
-        lines.append(f"Balance:   {fmt_amount(balance)} {asset}")
-        lines.append(f"Threshold: {fmt_amount(wallet['threshold'])} {asset}")
-        topup = _topup_line(wallet, balance)
-        if topup:
-            lines.append(topup)
+        if show_amounts:
+            lines.append(f"Balance:   {fmt_amount(balance)} {asset}")
+            lines.append(f"Threshold: {fmt_amount(wallet['threshold'])} {asset}")
+            topup = _topup_line(wallet, balance)
+            if topup:
+                lines.append(topup)
+        else:
+            lines.append("Below threshold")
         lines.append("")
     tag_line = _tags_line(tags)
     if tag_line:
@@ -75,7 +79,7 @@ def build_low_alert(low_wallets, tags=None):
     return "\n".join(lines).rstrip()
 
 
-def build_scan(results, title="Wallet balances"):
+def build_scan(results, title="Wallet balances", show_amounts=True):
     """results: list of (wallet, balance_or_None, error_or_None)"""
     lines = [f"<b>{_html.escape(title)}</b>", ""]
     topups = []
@@ -86,12 +90,15 @@ def build_scan(results, title="Wallet balances"):
             lines.append(f"{label}: fetch failed")
             continue
         status = "LOW" if balance < wallet["threshold"] else "OK"
-        lines.append(f"{label}:  {fmt_amount(balance)} {asset}  [{status}]")
-        if status == "LOW":
-            tu = _topup_line(wallet, balance)
-            if tu:
-                topups.append(f"  {label}: {tu.split(':', 1)[1].strip()}")
-    if topups:
+        if show_amounts:
+            lines.append(f"{label}:  {fmt_amount(balance)} {asset}  [{status}]")
+            if status == "LOW":
+                tu = _topup_line(wallet, balance)
+                if tu:
+                    topups.append(f"  {label}: {tu.split(':', 1)[1].strip()}")
+        else:
+            lines.append(f"{label}:  [{status}]")
+    if topups and show_amounts:
         lines += ["", "<b>Top ups needed:</b>"] + topups
     return "\n".join(lines)
 
@@ -164,7 +171,7 @@ class WalletBot:
 
     async def tick(self, context):
         bot = context.bot
-        low = []
+        low = []  # every wallet currently below threshold this tick
 
         for wallet in self.cfg["wallets"]:
             ws = wallet_state(self.state, wallet["label"])
@@ -193,28 +200,39 @@ class WalletBot:
             if balance < wallet["threshold"]:
                 low.append((wallet, balance))
 
+        show_amounts = self.cfg["show_amounts"]
         tags = self.cfg.get("alert_tags") or []
         if low:
-            await self.send(bot, build_low_alert(low, tags))
-        else:
+            # Re-sent every scan while anything stays low, so it keeps pinging
+            # until the wallet is topped up back above threshold.
+            await self.send(bot, build_low_alert(low, tags, show_amounts))
+        elif not self.heartbeat_due():
+            # When the daily heartbeat is due on this same tick it already
+            # reports all clear, so skip the routine all-clear to avoid a duplicate.
             await self.send(bot, "<b>All wallets above threshold.</b>")
 
         await self.maybe_heartbeat(bot)
         save_state(self.state_path, self.state)
 
-    async def maybe_heartbeat(self, bot):
+    def heartbeat_due(self):
+        """True if the daily heartbeat should fire on this tick (not yet sent today)."""
         hb = self.cfg["heartbeat"]
         if not hb["enabled"]:
-            return
+            return False
         tz = ZoneInfo(hb["timezone"])
         now = datetime.now(tz)
         hour, minute = (int(part) for part in str(hb["time"]).split(":"))
         due = now.hour > hour or (now.hour == hour and now.minute >= minute)
         already_sent = self.state.get("_last_heartbeat") == now.date().isoformat()
-        if due and not already_sent:
-            self.state["_last_heartbeat"] = now.date().isoformat()
-            date_str = now.strftime("%d %b %Y")
-            await self.send(bot, await self.scan_text(title=f"Daily heartbeat — {date_str}"))
+        return due and not already_sent
+
+    async def maybe_heartbeat(self, bot):
+        if not self.heartbeat_due():
+            return
+        now = datetime.now(ZoneInfo(self.cfg["heartbeat"]["timezone"]))
+        self.state["_last_heartbeat"] = now.date().isoformat()
+        date_str = now.strftime("%d %b %Y")
+        await self.send(bot, await self.scan_text(title=f"Daily heartbeat — {date_str}"))
 
     async def scan_text(self, title="Wallet balances"):
         results = []
@@ -224,7 +242,7 @@ class WalletBot:
                 results.append((wallet, balance, None))
             except fetchers.FetchError as exc:
                 results.append((wallet, None, exc))
-        return build_scan(results, title=title)
+        return build_scan(results, title=title, show_amounts=self.cfg["show_amounts"])
 
     # -- command handlers ---------------------------------------------------
 
@@ -280,14 +298,16 @@ class WalletBot:
         )
 
     async def cmd_help(self, update, context):
+        check = self.cfg["intervals"]["check_minutes"]
         await update.message.reply_text(
             "<b>Wallet balance bot</b>\n\n"
             "/balances — scan all wallets now\n"
             "/thresholds — show thresholds and targets\n"
             "/setthreshold &lt;asset or label&gt; &lt;amount&gt; — change a threshold\n"
             "/help — this message\n\n"
-            "Checks every hour on the hour. Alerts with @tags if any balance is low; "
-            "brief all-clear if all are above threshold.",
+            f"Scans every {check} min. Pings with @tags every scan while any balance is below "
+            "threshold, otherwise a brief all-clear when everything is above threshold. "
+            "A daily heartbeat proves the bot is alive.",
             parse_mode=ParseMode.HTML,
         )
 
@@ -319,16 +339,19 @@ def run_bot(cfg, state_path):
     app.add_handler(CommandHandler("help", bot.cmd_help, filters=only_andrew))
     app.add_handler(CommandHandler("start", bot.cmd_help, filters=only_andrew))
 
+    # Scan on a fixed interval, aligned to the next check-interval boundary.
+    interval_s = cfg["intervals"]["check_minutes"] * 60
     now = datetime.now(timezone.utc)
-    seconds_past_hour = now.minute * 60 + now.second + now.microsecond / 1_000_000
-    seconds_to_next_hour = 3600 - seconds_past_hour
-    app.job_queue.run_repeating(
-        bot.tick,
-        interval=3600,
-        first=seconds_to_next_hour,
-    )
+    seconds_into_hour = now.minute * 60 + now.second + now.microsecond / 1_000_000
+    first_delay = interval_s - (seconds_into_hour % interval_s)
+    app.job_queue.run_repeating(bot.tick, interval=interval_s, first=first_delay, name="scan")
 
-    logger.info("Starting bot: %d wallets, chat %s", len(cfg["wallets"]), cfg["allowed_chat_id"])
+    logger.info(
+        "Starting bot: %d wallets, scan every %d min, chat %s",
+        len(cfg["wallets"]),
+        cfg["intervals"]["check_minutes"],
+        cfg["allowed_chat_id"],
+    )
     app.run_polling(allowed_updates=["message"])
 
 

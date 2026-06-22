@@ -4,7 +4,7 @@ Read-only Telegram bot that watches public wallet addresses (native BTC, ETH, SO
 
 What it does:
 - Checks every wallet every 30 minutes (configurable) using free public block explorer APIs. No API keys, no Fireblocks access, nothing that can move funds.
-- When a balance drops below threshold: one alert, then a reminder every 10 minutes until the balance is back above threshold, then a one-off "recovered" message.
+- While a balance is below threshold it re-sends the LOW alert every scan, so it keeps pinging until topped up. On a healthy scan it posts a brief "all above threshold" confirmation, which is also how a recovery shows up.
 - `/balances` scans all wallets on demand.
 - If it cannot read a balance twice in a row, it tells you monitoring is degraded rather than failing silently.
 - Optional daily heartbeat message so you know the bot itself is alive.
@@ -40,7 +40,7 @@ python3 -m venv venv && venv/bin/pip install -r requirements.txt
 venv/bin/python -m bot.main --check          # one-shot balance scan, no Telegram needed
 TELEGRAM_BOT_TOKEN=... venv/bin/python -m bot.main   # run the actual bot
 ```
-To see the alert flow, temporarily set a threshold above the real balance and watch for the LOW alert, reminders, then `/setthreshold` it back down and wait for the recovery message.
+To see the alert flow, temporarily set a threshold above the real balance and watch for the LOW alert, then `/setthreshold` it back down and wait for the next "all above threshold" confirmation.
 
 ## Deploy (Hostinger VPS)
 

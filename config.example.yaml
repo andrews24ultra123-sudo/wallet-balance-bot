@@ -8,8 +8,7 @@ telegram:
   allowed_chat_id: 111111111   # your numeric Telegram chat id; the bot ignores everyone else
 
 intervals:
-  check_minutes: 30      # normal scan cadence
-  reminder_minutes: 10   # re-check + reminder cadence while a balance is low
+  check_minutes: 30      # scan cadence
 
 heartbeat:
   enabled: true          # one daily message with all balances, proves the bot is alive
