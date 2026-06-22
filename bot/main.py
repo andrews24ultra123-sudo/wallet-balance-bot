@@ -21,7 +21,7 @@ from zoneinfo import ZoneInfo
 from telegram.constants import ParseMode
 
 from . import fetchers
-from .config import ConfigError, find_wallets, load_config, save_threshold
+from .config import ConfigError, find_wallets, load_config, save_target, save_threshold
 
 logger = logging.getLogger("wallet-bot")
 
@@ -310,13 +310,73 @@ class WalletBot:
             parse_mode=ParseMode.HTML,
         )
 
+    async def cmd_targets(self, update, context):
+        lines = ["<b>Targets</b>", ""]
+        for w in self.cfg["wallets"]:
+            asset = w["asset"]
+            label = _html.escape(display_label(w["label"]))
+            if w.get("target"):
+                lines.append(f"{label}:  {fmt_amount(w['target'])} {asset}")
+            else:
+                lines.append(f"{label}:  (no target set)")
+        await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+
+    async def cmd_settarget(self, update, context):
+        args = context.args or []
+        if len(args) < 2:
+            await update.message.reply_text(
+                "Usage: /settarget &lt;asset or label&gt; &lt;amount&gt;\n"
+                "Example: /settarget BTC 2.0",
+                parse_mode=ParseMode.HTML,
+            )
+            return
+        key, raw_amount = " ".join(args[:-1]), args[-1]
+        try:
+            amount = Decimal(raw_amount)
+        except InvalidOperation:
+            await update.message.reply_text(f"'{_html.escape(raw_amount)}' is not a number.", parse_mode=ParseMode.HTML)
+            return
+        matches = find_wallets(self.cfg, key)
+        if not matches:
+            await update.message.reply_text(f"No wallet matches '{_html.escape(key)}'. See /targets.", parse_mode=ParseMode.HTML)
+            return
+        if len(matches) > 1:
+            labels = ", ".join(_html.escape(display_label(w["label"])) for w in matches)
+            await update.message.reply_text(
+                f"'{_html.escape(key)}' matches several wallets ({labels}). Use the exact label.",
+                parse_mode=ParseMode.HTML,
+            )
+            return
+        wallet = matches[0]
+        if amount <= 0:
+            await update.message.reply_text("Target must be greater than zero.", parse_mode=ParseMode.HTML)
+            return
+        if amount < wallet["threshold"]:
+            await update.message.reply_text(
+                f"Target {fmt_amount(amount)} {wallet['asset']} is below the threshold "
+                f"({fmt_amount(wallet['threshold'])} {wallet['asset']}). The target is the top-up "
+                "goal and should sit at or above the threshold. Not changed.",
+                parse_mode=ParseMode.HTML,
+            )
+            return
+        save_target(self.cfg, wallet["label"], amount)
+        asset = wallet["asset"]
+        label = _html.escape(display_label(wallet["label"]))
+        await update.message.reply_text(
+            f"Target updated: {label}\n"
+            f"New target: {fmt_amount(amount)} {asset}",
+            parse_mode=ParseMode.HTML,
+        )
+
     async def cmd_help(self, update, context):
         check = self.cfg["intervals"]["check_minutes"]
         await update.message.reply_text(
             "<b>Wallet balance bot</b>\n\n"
             "/balances - scan all wallets now\n"
-            "/thresholds - show thresholds and targets\n"
+            "/thresholds - show thresholds (with targets)\n"
+            "/targets - show targets\n"
             "/setthreshold &lt;asset or label&gt; &lt;amount&gt; - change a threshold\n"
+            "/settarget &lt;asset or label&gt; &lt;amount&gt; - change a target\n"
             "/help - this message\n\n"
             f"Scans every {check} min. Pings with @tags every scan while any balance is below "
             "threshold, otherwise a brief all-clear when everything is above threshold. "
@@ -348,7 +408,9 @@ def run_bot(cfg, state_path):
     only_andrew = filters.Chat(chat_id=cfg["allowed_chat_ids"])
     app.add_handler(CommandHandler("balances", bot.cmd_balances, filters=only_andrew))
     app.add_handler(CommandHandler("thresholds", bot.cmd_thresholds, filters=only_andrew))
+    app.add_handler(CommandHandler("targets", bot.cmd_targets, filters=only_andrew))
     app.add_handler(CommandHandler("setthreshold", bot.cmd_setthreshold, filters=only_andrew))
+    app.add_handler(CommandHandler("settarget", bot.cmd_settarget, filters=only_andrew))
     app.add_handler(CommandHandler("help", bot.cmd_help, filters=only_andrew))
     app.add_handler(CommandHandler("start", bot.cmd_help, filters=only_andrew))
 

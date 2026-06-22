@@ -83,14 +83,14 @@ def load_config(path):
     return cfg
 
 
-def save_threshold(cfg, label, new_threshold):
-    """Persist a threshold change back to config.yaml without touching other keys."""
+def _save_wallet_value(cfg, label, key, value):
+    """Persist a single wallet field back to config.yaml without touching other keys."""
     path = cfg["path"]
     with open(path) as fh:
         raw = yaml.safe_load(fh) or {}
     for w in raw.get("wallets") or []:
         if w.get("label") == label:
-            w["threshold"] = float(new_threshold)
+            w[key] = float(value)
             break
     else:
         raise ConfigError(f"Wallet '{label}' not found in {path}")
@@ -98,7 +98,17 @@ def save_threshold(cfg, label, new_threshold):
         yaml.safe_dump(raw, fh, sort_keys=False, default_flow_style=False)
     for w in cfg["wallets"]:
         if w["label"] == label:
-            w["threshold"] = new_threshold
+            w[key] = value
+
+
+def save_threshold(cfg, label, new_threshold):
+    """Persist a threshold change back to config.yaml."""
+    _save_wallet_value(cfg, label, "threshold", new_threshold)
+
+
+def save_target(cfg, label, new_target):
+    """Persist a target change back to config.yaml."""
+    _save_wallet_value(cfg, label, "target", new_target)
 
 
 def find_wallets(cfg, key):
