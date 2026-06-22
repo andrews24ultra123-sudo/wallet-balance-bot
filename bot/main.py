@@ -96,19 +96,20 @@ def build_scan(results, title="Wallet balances", show_amounts=True):
             lines.append(f"{label}: fetch failed")
             continue
         status = "LOW" if balance < wallet["threshold"] else "OK"
+        badge = "✅" if status == "OK" else "❌"
         if show_amounts:
             line = f"{label}:  {fmt_amount(balance)} {asset}"
             if wallet.get("target"):
                 pct = balance / wallet["target"] * 100
                 line += f"  {pct:.1f}% full"
-            line += f"  [{status}]"
+            line += f"  [{status}] {badge}"
             lines.append(line)
             if status == "LOW":
                 tu = _topup_line(wallet, balance)
                 if tu:
                     topups.append(f"  {label}: {tu.split(':', 1)[1].strip()}")
         else:
-            lines.append(f"{label}:  [{status}]")
+            lines.append(f"{label}:  [{status}] {badge}")
     if topups and show_amounts:
         lines += ["", "<b>Top ups needed:</b>"] + topups
     return "\n".join(lines)
