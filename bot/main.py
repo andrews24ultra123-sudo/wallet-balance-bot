@@ -138,30 +138,36 @@ def build_scan(results, title="Wallet balances", show_amounts=True):
 def build_topup_plan(results):
     """Funding plan: amount needed to bring each wallet up to its target.
 
-    results: list of (wallet, balance_or_None, error_or_None). Calculation only;
-    the bot does not move funds.
+    Rendered as a borderless monospace table inside a <pre> block, matching the
+    /balances layout. results: list of (wallet, balance_or_None, error_or_None).
+    Calculation only; the bot does not move funds.
     """
-    lines = ["<b>Top-up to target</b>", ""]
+    from prettytable import PrettyTable
+
+    table = PrettyTable()
+    table.border = False
+    table.align = "l"
+    table.field_names = ["Asset", "Top up", "Current", "Target"]
+
     any_needed = False
     for wallet, balance, error in results:
-        asset = wallet["asset"]
-        label = _html.escape(display_label(wallet["label"]))
+        label = display_label(wallet["label"])  # raw; the whole table is escaped below
         if error:
-            lines.append(f"{label}: fetch failed")
+            table.add_row([label, "fetch failed", "", ""])
             continue
         target = wallet.get("target")
         if not target:
-            lines.append(f"{label}:  no target set")
+            table.add_row([label, "no target", fmt_amount(balance), ""])
             continue
         topup = target - balance
         if topup > 0:
             any_needed = True
-            lines.append(
-                f"{label}:  +{fmt_amount(topup)} {asset}  "
-                f"({fmt_amount(balance)} -> {fmt_amount(target)})"
-            )
+            table.add_row([label, f"+{fmt_amount(topup)}", fmt_amount(balance), fmt_amount(target)])
         else:
-            lines.append(f"{label}:  at target ({fmt_amount(balance)} {asset})")
+            table.add_row([label, "at target", fmt_amount(balance), fmt_amount(target)])
+
+    table_str = _html.escape(table.get_string())
+    lines = ["<b>Top-up to target</b>", "", f"<pre>{table_str}</pre>"]
     if not any_needed:
         lines += ["", "All wallets are at or above target. Nothing to top up."]
     return "\n".join(lines)
