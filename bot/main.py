@@ -141,14 +141,8 @@ def build_topup_plan(results):
             )
         else:
             lines.append(f"{label}:  at target ({fmt_amount(balance)} {asset})")
-    lines.append("")
-    if any_needed:
-        lines.append(
-            "Amounts needed to reach each target. Funding plan only: execute through the "
-            "normal hot wallet funding process with maker-checker. The bot does not move funds."
-        )
-    else:
-        lines.append("All wallets are at or above target. Nothing to top up.")
+    if not any_needed:
+        lines += ["", "All wallets are at or above target. Nothing to top up."]
     return "\n".join(lines)
 
 
