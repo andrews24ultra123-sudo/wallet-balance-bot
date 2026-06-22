@@ -43,6 +43,14 @@ def short_addr(address):
     return f"{address[:6]}...{address[-4:]}"
 
 
+def display_label(label):
+    """Drop a redundant ' hot wallet' suffix for display; they are all hot wallets."""
+    suffix = " hot wallet"
+    if label.lower().endswith(suffix):
+        return label[: -len(suffix)].strip() or label
+    return label
+
+
 def _topup_line(wallet, balance):
     if wallet.get("target"):
         topup = wallet["target"] - balance
@@ -62,7 +70,7 @@ def build_low_alert(low_wallets, tags=None, show_amounts=True):
     lines = ["<b>LOW BALANCE</b>", ""]
     for wallet, balance in low_wallets:
         asset = wallet["asset"]
-        label = _html.escape(wallet["label"])
+        label = _html.escape(display_label(wallet["label"]))
         lines.append(f"{label}")
         if show_amounts:
             lines.append(f"Balance:   {fmt_amount(balance)} {asset}")
@@ -85,7 +93,7 @@ def build_scan(results, title="Wallet balances", show_amounts=True):
     topups = []
     for wallet, balance, error in results:
         asset = wallet["asset"]
-        label = _html.escape(wallet["label"])
+        label = _html.escape(display_label(wallet["label"]))
         if error:
             lines.append(f"{label}: fetch failed")
             continue
@@ -187,7 +195,7 @@ class WalletBot:
                 logger.warning("Fetch failed (%s consecutive): %s", ws["fetch_failures"], exc)
                 if ws["fetch_failures"] >= 2 and not ws["degraded_alerted"]:
                     ws["degraded_alerted"] = True
-                    label = _html.escape(wallet["label"])
+                    label = _html.escape(display_label(wallet["label"]))
                     await self.send(
                         bot,
                         f"<b>Monitoring degraded:</b> {label}\n\n"
@@ -197,7 +205,7 @@ class WalletBot:
                 continue
 
             if ws["degraded_alerted"]:
-                label = _html.escape(wallet["label"])
+                label = _html.escape(display_label(wallet["label"]))
                 await self.send(bot, f"<b>Monitoring restored:</b> {label}")
             ws["fetch_failures"] = 0
             ws["degraded_alerted"] = False
@@ -261,7 +269,7 @@ class WalletBot:
         lines = ["<b>Thresholds</b>", ""]
         for w in self.cfg["wallets"]:
             asset = w["asset"]
-            label = _html.escape(w["label"])
+            label = _html.escape(display_label(w["label"]))
             target = f"  →  target {fmt_amount(w['target'])} {asset}" if w.get("target") else ""
             lines.append(f"{label}:  {fmt_amount(w['threshold'])} {asset}{target}")
         await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
@@ -286,7 +294,7 @@ class WalletBot:
             await update.message.reply_text(f"No wallet matches '{_html.escape(key)}'. See /thresholds.", parse_mode=ParseMode.HTML)
             return
         if len(matches) > 1:
-            labels = ", ".join(_html.escape(w["label"]) for w in matches)
+            labels = ", ".join(_html.escape(display_label(w["label"])) for w in matches)
             await update.message.reply_text(
                 f"'{_html.escape(key)}' matches several wallets ({labels}). Use the exact label.",
                 parse_mode=ParseMode.HTML,
@@ -295,7 +303,7 @@ class WalletBot:
         wallet = matches[0]
         save_threshold(self.cfg, wallet["label"], amount)
         asset = wallet["asset"]
-        label = _html.escape(wallet["label"])
+        label = _html.escape(display_label(wallet["label"]))
         await update.message.reply_text(
             f"Threshold updated: {label}\n"
             f"New threshold: {fmt_amount(amount)} {asset}",
