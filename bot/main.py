@@ -301,6 +301,17 @@ class WalletBot:
             )
             return
         wallet = matches[0]
+        if amount <= 0:
+            await update.message.reply_text("Threshold must be greater than zero.", parse_mode=ParseMode.HTML)
+            return
+        if wallet.get("target") and amount > wallet["target"]:
+            await update.message.reply_text(
+                f"Threshold {fmt_amount(amount)} {wallet['asset']} is above the target "
+                f"({fmt_amount(wallet['target'])} {wallet['asset']}). The threshold is the alert "
+                "line and should sit at or below the top-up target. Not changed.",
+                parse_mode=ParseMode.HTML,
+            )
+            return
         save_threshold(self.cfg, wallet["label"], amount)
         asset = wallet["asset"]
         label = _html.escape(display_label(wallet["label"]))
