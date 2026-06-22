@@ -91,7 +91,12 @@ def build_scan(results, title="Wallet balances", show_amounts=True):
             continue
         status = "LOW" if balance < wallet["threshold"] else "OK"
         if show_amounts:
-            lines.append(f"{label}:  {fmt_amount(balance)} {asset}  [{status}]")
+            line = f"{label}:  {fmt_amount(balance)} {asset}"
+            if wallet.get("target"):
+                pct = balance / wallet["target"] * 100
+                line += f"  {pct:.1f}% full"
+            line += f"  [{status}]"
+            lines.append(line)
             if status == "LOW":
                 tu = _topup_line(wallet, balance)
                 if tu:
