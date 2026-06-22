@@ -86,30 +86,50 @@ def build_low_alert(low_wallets, tags=None, show_amounts=True):
 
 
 def build_scan(results, title="Wallet balances", show_amounts=True):
-    """results: list of (wallet, balance_or_None, error_or_None)"""
-    lines = [f"<b>{_html.escape(title)}</b>", ""]
+    """results: list of (wallet, balance_or_None, error_or_None).
+
+    Renders a borderless, column-aligned table inside a <pre> block (Telegram
+    shows <pre> in a monospace font, so the columns line up). A status emoji is
+    appended after each row, outside the aligned columns so it can't skew them.
+    """
+    from prettytable import PrettyTable
+
+    table = PrettyTable()
+    table.border = False
+    table.align = "l"
+    table.field_names = ["Asset", "Balance", "Full", "St"] if show_amounts else ["Asset", "St"]
+
+    badges = []
     topups = []
     for wallet, balance, error in results:
-        asset = wallet["asset"]
-        label = _html.escape(display_label(wallet["label"]))
+        label = display_label(wallet["label"])  # raw; the whole table is escaped below
         if error:
-            lines.append(f"{label}: fetch failed")
+            badges.append("⚠️")
+            table.add_row([label, "fetch failed", "", "?"] if show_amounts else [label, "?"])
             continue
         status = "LOW" if balance < wallet["threshold"] else "OK"
-        badge = "✅" if status == "OK" else "❌"
+        badges.append("✅" if status == "OK" else "❌")
         if show_amounts:
-            line = f"{label}:  {fmt_amount(balance)} {asset}"
-            if wallet.get("target"):
-                pct = balance / wallet["target"] * 100
-                line += f"  {pct:.1f}% full"
-            line += f"  [{status}] {badge}"
-            lines.append(line)
+            full = f"{balance / wallet['target'] * 100:.1f}%" if wallet.get("target") else ""
+            table.add_row([label, fmt_amount(balance), full, status])
             if status == "LOW":
                 tu = _topup_line(wallet, balance)
                 if tu:
-                    topups.append(f"  {label}: {tu.split(':', 1)[1].strip()}")
+                    topups.append(f"  {_html.escape(label)}: {tu.split(':', 1)[1].strip()}")
         else:
-            lines.append(f"{label}:  [{status}] {badge}")
+            table.add_row([label, status])
+
+    # First output line is the header; data rows follow in insertion order.
+    # Pad every row to a common width so the trailing emoji line up in a column.
+    out_lines = table.get_string().split("\n")
+    width = max(len(line.rstrip()) for line in out_lines)
+    for i, badge in enumerate(badges):
+        row = i + 1
+        if row < len(out_lines):
+            out_lines[row] = out_lines[row].rstrip().ljust(width) + "  " + badge
+    table_str = _html.escape("\n".join(out_lines))
+
+    lines = [f"<b>{_html.escape(title)}</b>", "", f"<pre>{table_str}</pre>"]
     if topups and show_amounts:
         lines += ["", "<b>Top ups needed:</b>"] + topups
     return "\n".join(lines)

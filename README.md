@@ -77,6 +77,10 @@ Edit locally, push to GitHub, then on the VPS:
 ```bash
 cd /opt/wallet-balance-bot && git pull && systemctl restart wallet-bot
 ```
+If `requirements.txt` changed in the pull, install the new deps first:
+```bash
+cd /opt/wallet-balance-bot && git pull && venv/bin/pip install -r requirements.txt && systemctl restart wallet-bot
+```
 
 ### Day-to-day
 - `systemctl status wallet-bot` - is it running
