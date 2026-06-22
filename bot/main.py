@@ -114,6 +114,44 @@ def build_scan(results, title="Wallet balances", show_amounts=True):
     return "\n".join(lines)
 
 
+def build_topup_plan(results):
+    """Funding plan: amount needed to bring each wallet up to its target.
+
+    results: list of (wallet, balance_or_None, error_or_None). Calculation only;
+    the bot does not move funds.
+    """
+    lines = ["<b>Top-up to target</b>", ""]
+    any_needed = False
+    for wallet, balance, error in results:
+        asset = wallet["asset"]
+        label = _html.escape(display_label(wallet["label"]))
+        if error:
+            lines.append(f"{label}: fetch failed")
+            continue
+        target = wallet.get("target")
+        if not target:
+            lines.append(f"{label}:  no target set")
+            continue
+        topup = target - balance
+        if topup > 0:
+            any_needed = True
+            lines.append(
+                f"{label}:  +{fmt_amount(topup)} {asset}  "
+                f"({fmt_amount(balance)} -> {fmt_amount(target)})"
+            )
+        else:
+            lines.append(f"{label}:  at target ({fmt_amount(balance)} {asset})")
+    lines.append("")
+    if any_needed:
+        lines.append(
+            "Amounts needed to reach each target. Funding plan only: execute through the "
+            "normal hot wallet funding process with maker-checker. The bot does not move funds."
+        )
+    else:
+        lines.append("All wallets are at or above target. Nothing to top up.")
+    return "\n".join(lines)
+
+
 # ---------------------------------------------------------------------------
 # Persistent state (fetch failure tracking and heartbeat date only)
 
@@ -245,15 +283,20 @@ class WalletBot:
         date_str = now.strftime("%d %b %Y")
         await self.send(bot, await self.scan_text(title=f"Daily heartbeat: {date_str}"))
 
-    async def scan_text(self, title="Wallet balances"):
+    async def fetch_all(self):
+        """Fetch every wallet's balance: list of (wallet, balance_or_None, error_or_None)."""
         results = []
         for wallet in self.cfg["wallets"]:
             try:
-                balance = await self.fetch(wallet)
-                results.append((wallet, balance, None))
+                results.append((wallet, await self.fetch(wallet), None))
             except fetchers.FetchError as exc:
                 results.append((wallet, None, exc))
-        return build_scan(results, title=title, show_amounts=self.cfg["show_amounts"])
+        return results
+
+    async def scan_text(self, title="Wallet balances"):
+        return build_scan(
+            await self.fetch_all(), title=title, show_amounts=self.cfg["show_amounts"]
+        )
 
     # -- command handlers ---------------------------------------------------
 
@@ -261,6 +304,12 @@ class WalletBot:
         await update.message.reply_text("Scanning...", parse_mode=ParseMode.HTML)
         await update.message.reply_text(
             await self.scan_text(), parse_mode=ParseMode.HTML
+        )
+
+    async def cmd_maxtopup(self, update, context):
+        await update.message.reply_text("Calculating top-up to target...", parse_mode=ParseMode.HTML)
+        await update.message.reply_text(
+            build_topup_plan(await self.fetch_all()), parse_mode=ParseMode.HTML
         )
 
     async def cmd_thresholds(self, update, context):
@@ -382,6 +431,7 @@ class WalletBot:
         await update.message.reply_text(
             "<b>Wallet balance bot</b>\n\n"
             "/balances - scan all wallets now\n"
+            "/maxtopup - amounts to bring every wallet up to target (plan only)\n"
             "/thresholds - show thresholds (with targets)\n"
             "/targets - show targets\n"
             "/setthreshold &lt;asset or label&gt; &lt;amount&gt; - change a threshold\n"
@@ -416,6 +466,7 @@ def run_bot(cfg, state_path):
 
     only_andrew = filters.Chat(chat_id=cfg["allowed_chat_ids"])
     app.add_handler(CommandHandler("balances", bot.cmd_balances, filters=only_andrew))
+    app.add_handler(CommandHandler("maxtopup", bot.cmd_maxtopup, filters=only_andrew))
     app.add_handler(CommandHandler("thresholds", bot.cmd_thresholds, filters=only_andrew))
     app.add_handler(CommandHandler("targets", bot.cmd_targets, filters=only_andrew))
     app.add_handler(CommandHandler("setthreshold", bot.cmd_setthreshold, filters=only_andrew))

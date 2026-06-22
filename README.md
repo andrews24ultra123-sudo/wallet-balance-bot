@@ -11,8 +11,11 @@ What it does:
 
 Commands (the bot only answers the configured chat id):
 - `/balances` - scan all wallets now
-- `/thresholds` - show thresholds
+- `/maxtopup` - amounts to bring every wallet up to target (calculation only; does not move funds)
+- `/thresholds` - show thresholds (with targets)
+- `/targets` - show targets
 - `/setthreshold <asset or label> <amount>` - change a threshold (persisted to config.yaml)
+- `/settarget <asset or label> <amount>` - change a target (persisted to config.yaml)
 - `/help`
 
 XRP note: balances are reported as spendable, i.e. total minus the XRPL reserve (1 XRP base + 0.2 per owned object), because the reserve cannot fund withdrawals.
