@@ -49,6 +49,19 @@ def display_label(label):
     return label
 
 
+def pre_table(field_names, rows):
+    """Borderless, column-aligned table in a <pre> block (monospace in Telegram)."""
+    from prettytable import PrettyTable
+
+    table = PrettyTable()
+    table.border = False
+    table.align = "l"
+    table.field_names = field_names
+    for row in rows:
+        table.add_row(row)
+    return f"<pre>{_html.escape(table.get_string())}</pre>"
+
+
 def _topup_line(wallet, balance):
     if wallet.get("target"):
         topup = wallet["target"] - balance
@@ -142,32 +155,25 @@ def build_topup_plan(results):
     /balances layout. results: list of (wallet, balance_or_None, error_or_None).
     Calculation only; the bot does not move funds.
     """
-    from prettytable import PrettyTable
-
-    table = PrettyTable()
-    table.border = False
-    table.align = "l"
-    table.field_names = ["Asset", "Top up", "Current", "Target"]
-
+    rows = []
     any_needed = False
     for wallet, balance, error in results:
-        label = display_label(wallet["label"])  # raw; the whole table is escaped below
+        label = display_label(wallet["label"])
         if error:
-            table.add_row([label, "fetch failed", "", ""])
+            rows.append([label, "fetch failed", "", ""])
             continue
         target = wallet.get("target")
         if not target:
-            table.add_row([label, "no target", fmt_amount(balance), ""])
+            rows.append([label, "no target", fmt_amount(balance), ""])
             continue
         topup = target - balance
         if topup > 0:
             any_needed = True
-            table.add_row([label, f"+{fmt_amount(topup)}", fmt_amount(balance), fmt_amount(target)])
+            rows.append([label, f"+{fmt_amount(topup)}", fmt_amount(balance), fmt_amount(target)])
         else:
-            table.add_row([label, "at target", fmt_amount(balance), fmt_amount(target)])
+            rows.append([label, "at target", fmt_amount(balance), fmt_amount(target)])
 
-    table_str = _html.escape(table.get_string())
-    lines = ["<b>Top-up to target</b>", "", f"<pre>{table_str}</pre>"]
+    lines = ["<b>Top-up to target</b>", "", pre_table(["Asset", "Top up", "Current", "Target"], rows)]
     if not any_needed:
         lines += ["", "All wallets are at or above target. Nothing to top up."]
     return "\n".join(lines)
@@ -334,13 +340,16 @@ class WalletBot:
         )
 
     async def cmd_thresholds(self, update, context):
-        lines = ["<b>Thresholds</b>", ""]
-        for w in self.cfg["wallets"]:
-            asset = w["asset"]
-            label = _html.escape(display_label(w["label"]))
-            target = f"  →  target {fmt_amount(w['target'])} {asset}" if w.get("target") else ""
-            lines.append(f"{label}:  {fmt_amount(w['threshold'])} {asset}{target}")
-        await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+        rows = [
+            [
+                display_label(w["label"]),
+                fmt_amount(w["threshold"]),
+                fmt_amount(w["target"]) if w.get("target") else "-",
+            ]
+            for w in self.cfg["wallets"]
+        ]
+        text = "<b>Thresholds</b>\n\n" + pre_table(["Asset", "Threshold", "Target"], rows)
+        await update.message.reply_text(text, parse_mode=ParseMode.HTML)
 
     async def cmd_setthreshold(self, update, context):
         args = context.args or []
@@ -390,15 +399,12 @@ class WalletBot:
         )
 
     async def cmd_targets(self, update, context):
-        lines = ["<b>Targets</b>", ""]
-        for w in self.cfg["wallets"]:
-            asset = w["asset"]
-            label = _html.escape(display_label(w["label"]))
-            if w.get("target"):
-                lines.append(f"{label}:  {fmt_amount(w['target'])} {asset}")
-            else:
-                lines.append(f"{label}:  (no target set)")
-        await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+        rows = [
+            [display_label(w["label"]), fmt_amount(w["target"]) if w.get("target") else "no target"]
+            for w in self.cfg["wallets"]
+        ]
+        text = "<b>Targets</b>\n\n" + pre_table(["Asset", "Target"], rows)
+        await update.message.reply_text(text, parse_mode=ParseMode.HTML)
 
     async def cmd_settarget(self, update, context):
         args = context.args or []
