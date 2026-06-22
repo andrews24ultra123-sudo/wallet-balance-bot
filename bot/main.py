@@ -15,7 +15,7 @@ import json
 import logging
 import os
 from datetime import datetime, timezone
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_DOWN
 from zoneinfo import ZoneInfo
 
 from telegram.constants import ParseMode
@@ -29,12 +29,10 @@ STATE_FILE = "state.json"
 
 
 def fmt_amount(value):
-    """Format a Decimal for display: max 4 decimal places, trailing zeros stripped."""
-    rounded = round(value, 4)
-    text = format(rounded, "f")
-    if "." in text:
-        text = text.rstrip("0").rstrip(".")
-    return text
+    """Format a Decimal for display: 2 decimal places, rounded down so a balance
+    is never overstated, with thousands separators (e.g. 49,141.92)."""
+    q = value.quantize(Decimal("0.01"), rounding=ROUND_DOWN)
+    return f"{q:,.2f}"
 
 
 def short_addr(address):
