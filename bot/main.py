@@ -185,7 +185,7 @@ class WalletBot:
                     label = _html.escape(wallet["label"])
                     await self.send(
                         bot,
-                        f"<b>Monitoring degraded</b> — {label}\n\n"
+                        f"<b>Monitoring degraded:</b> {label}\n\n"
                         f"Could not read balance after {ws['fetch_failures']} attempts. "
                         "Balance alerts for this wallet are unreliable until this recovers.",
                     )
@@ -193,7 +193,7 @@ class WalletBot:
 
             if ws["degraded_alerted"]:
                 label = _html.escape(wallet["label"])
-                await self.send(bot, f"<b>Monitoring restored</b> — {label}")
+                await self.send(bot, f"<b>Monitoring restored:</b> {label}")
             ws["fetch_failures"] = 0
             ws["degraded_alerted"] = False
 
@@ -232,7 +232,7 @@ class WalletBot:
         now = datetime.now(ZoneInfo(self.cfg["heartbeat"]["timezone"]))
         self.state["_last_heartbeat"] = now.date().isoformat()
         date_str = now.strftime("%d %b %Y")
-        await self.send(bot, await self.scan_text(title=f"Daily heartbeat — {date_str}"))
+        await self.send(bot, await self.scan_text(title=f"Daily heartbeat: {date_str}"))
 
     async def scan_text(self, title="Wallet balances"):
         results = []
@@ -292,7 +292,7 @@ class WalletBot:
         asset = wallet["asset"]
         label = _html.escape(wallet["label"])
         await update.message.reply_text(
-            f"Threshold updated — {label}\n"
+            f"Threshold updated: {label}\n"
             f"New threshold: {fmt_amount(amount)} {asset}",
             parse_mode=ParseMode.HTML,
         )
@@ -301,10 +301,10 @@ class WalletBot:
         check = self.cfg["intervals"]["check_minutes"]
         await update.message.reply_text(
             "<b>Wallet balance bot</b>\n\n"
-            "/balances — scan all wallets now\n"
-            "/thresholds — show thresholds and targets\n"
-            "/setthreshold &lt;asset or label&gt; &lt;amount&gt; — change a threshold\n"
-            "/help — this message\n\n"
+            "/balances - scan all wallets now\n"
+            "/thresholds - show thresholds and targets\n"
+            "/setthreshold &lt;asset or label&gt; &lt;amount&gt; - change a threshold\n"
+            "/help - this message\n\n"
             f"Scans every {check} min. Pings with @tags every scan while any balance is below "
             "threshold, otherwise a brief all-clear when everything is above threshold. "
             "A daily heartbeat proves the bot is alive.",
