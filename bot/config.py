@@ -111,6 +111,19 @@ def save_target(cfg, label, new_target):
     _save_wallet_value(cfg, label, "target", new_target)
 
 
+def save_interval(cfg, key, minutes):
+    """Persist an interval (whole minutes) under the `intervals` block of config.yaml."""
+    path = cfg["path"]
+    with open(path) as fh:
+        raw = yaml.safe_load(fh) or {}
+    intervals = raw.get("intervals") or {}
+    intervals[key] = int(minutes)
+    raw["intervals"] = intervals
+    with open(path, "w") as fh:
+        yaml.safe_dump(raw, fh, sort_keys=False, default_flow_style=False)
+    cfg["intervals"][key] = int(minutes)
+
+
 def find_wallets(cfg, key):
     """Match wallets by exact label first, then by asset symbol."""
     by_label = [w for w in cfg["wallets"] if w["label"].lower() == key.lower()]

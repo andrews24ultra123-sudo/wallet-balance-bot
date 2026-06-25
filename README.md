@@ -17,6 +17,7 @@ Commands (the bot only answers the configured chat id):
 - `/targets` - show targets
 - `/setthreshold <asset or label> <amount>` - change a threshold (persisted to config.yaml)
 - `/settarget <asset or label> <amount>` - change a target (persisted to config.yaml)
+- `/setalertcheck <minutes>` - change the fast-check interval (persisted to config.yaml, takes effect immediately)
 - `/help`
 
 XRP note: balances are reported as spendable, i.e. total minus the XRPL reserve (1 XRP base + 0.2 per owned object), because the reserve cannot fund withdrawals.

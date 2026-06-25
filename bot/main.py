@@ -21,7 +21,7 @@ from zoneinfo import ZoneInfo
 from telegram.constants import ParseMode
 
 from . import fetchers
-from .config import ConfigError, find_wallets, load_config, save_target, save_threshold
+from .config import ConfigError, find_wallets, load_config, save_interval, save_target, save_threshold
 
 logger = logging.getLogger("wallet-bot")
 
@@ -477,6 +477,64 @@ class WalletBot:
             parse_mode=ParseMode.HTML,
         )
 
+    async def cmd_setalertcheck(self, update, context):
+        args = context.args or []
+        if len(args) != 1:
+            await update.message.reply_text(
+                "Usage: /setalertcheck &lt;minutes&gt;\n"
+                "Example: /setalertcheck 15",
+                parse_mode=ParseMode.HTML,
+            )
+            return
+        try:
+            minutes = int(args[0])
+        except ValueError:
+            await update.message.reply_text(
+                f"'{_html.escape(args[0])}' is not a whole number of minutes.",
+                parse_mode=ParseMode.HTML,
+            )
+            return
+        scan = self.cfg["intervals"]["check_minutes"]
+        if minutes < 1:
+            await update.message.reply_text(
+                "The fast check interval must be at least 1 minute. Not changed.",
+                parse_mode=ParseMode.HTML,
+            )
+            return
+        if minutes > scan:
+            await update.message.reply_text(
+                f"The fast check ({minutes} min) should not be slower than the main scan "
+                f"({scan} min), or it adds nothing. Not changed.",
+                parse_mode=ParseMode.HTML,
+            )
+            return
+
+        save_interval(self.cfg, "alert_check_minutes", minutes)
+
+        # Reschedule the live job so the change takes effect now, without a restart.
+        # The hourly "scan" job is left untouched.
+        for job in context.job_queue.get_jobs_by_name("alert"):
+            job.schedule_removal()
+        alert_interval_s = minutes * 60
+        now = datetime.now(timezone.utc)
+        seconds_into_hour = now.minute * 60 + now.second + now.microsecond / 1_000_000
+        alert_first = alert_interval_s - (seconds_into_hour % alert_interval_s)
+        context.job_queue.run_repeating(
+            self.tick_alert, interval=alert_interval_s, first=alert_first, name="alert"
+        )
+
+        note = ""
+        if 60 % minutes:
+            note = (
+                " Note: this does not divide evenly into 60 min, so it will occasionally "
+                "land in the same minute as the main scan (a duplicate low alert, only when "
+                "something is already low)."
+            )
+        await update.message.reply_text(
+            f"Fast check interval updated to {minutes} min and now live.{note}",
+            parse_mode=ParseMode.HTML,
+        )
+
     async def cmd_help(self, update, context):
         check = self.cfg["intervals"]["check_minutes"]
         alert_check = self.cfg["intervals"]["alert_check_minutes"]
@@ -488,6 +546,7 @@ class WalletBot:
             "/targets - show targets\n"
             "/setthreshold &lt;asset or label&gt; &lt;amount&gt; - change a threshold\n"
             "/settarget &lt;asset or label&gt; &lt;amount&gt; - change a target\n"
+            "/setalertcheck &lt;minutes&gt; - change the fast-check interval\n"
             "/help - this message\n\n"
             f"Scans every {check} min. Pings with @tags every scan while any balance is below "
             "threshold, otherwise a brief all-clear when everything is above threshold. "
@@ -525,6 +584,7 @@ def run_bot(cfg, state_path):
     app.add_handler(CommandHandler("targets", bot.cmd_targets, filters=only_andrew))
     app.add_handler(CommandHandler("setthreshold", bot.cmd_setthreshold, filters=only_andrew))
     app.add_handler(CommandHandler("settarget", bot.cmd_settarget, filters=only_andrew))
+    app.add_handler(CommandHandler("setalertcheck", bot.cmd_setalertcheck, filters=only_andrew))
     app.add_handler(CommandHandler("help", bot.cmd_help, filters=only_andrew))
     app.add_handler(CommandHandler("start", bot.cmd_help, filters=only_andrew))
 
