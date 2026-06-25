@@ -13,7 +13,7 @@ class ConfigError(Exception):
 
 
 DEFAULTS = {
-    "intervals": {"check_minutes": 30},
+    "intervals": {"check_minutes": 30, "alert_check_minutes": 16},
     "heartbeat": {"enabled": True, "time": "09:00", "timezone": "Asia/Singapore"},
     "show_amounts": True,
 }

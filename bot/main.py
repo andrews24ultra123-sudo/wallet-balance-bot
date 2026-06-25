@@ -290,6 +290,30 @@ class WalletBot:
         await self.maybe_heartbeat(bot)
         save_state(self.state_path, self.state)
 
+    async def tick_alert(self, context):
+        """Fast supplementary scan: silent unless a wallet is below threshold.
+
+        Runs on the shorter `alert_check_minutes` cadence between the hourly
+        `tick`s. Read-only: it does not mutate state, send an all-clear, run the
+        heartbeat, or raise degraded/restored alerts (the hourly `tick` owns all
+        of that), so it cannot race with `tick`. It only pings when something is
+        low, to catch a low hot wallet faster than once an hour."""
+        bot = context.bot
+        low = []
+        for wallet in self.cfg["wallets"]:
+            try:
+                balance = await self.fetch(wallet)
+            except fetchers.FetchError as exc:
+                logger.warning("Fast check fetch failed (%s): %s", wallet["label"], exc)
+                continue
+            if balance < wallet["threshold"]:
+                low.append((wallet, balance))
+
+        if low:
+            show_amounts = self.cfg["show_amounts"]
+            tags = self.cfg.get("alert_tags") or []
+            await self.send(bot, build_low_alert(low, tags, show_amounts))
+
     def heartbeat_due(self):
         """True if the daily heartbeat should fire on this tick (not yet sent today)."""
         hb = self.cfg["heartbeat"]
@@ -455,6 +479,7 @@ class WalletBot:
 
     async def cmd_help(self, update, context):
         check = self.cfg["intervals"]["check_minutes"]
+        alert_check = self.cfg["intervals"]["alert_check_minutes"]
         await update.message.reply_text(
             "<b>Wallet balance bot</b>\n\n"
             "/balances - scan all wallets now\n"
@@ -466,6 +491,8 @@ class WalletBot:
             "/help - this message\n\n"
             f"Scans every {check} min. Pings with @tags every scan while any balance is below "
             "threshold, otherwise a brief all-clear when everything is above threshold. "
+            f"Also runs a fast check every {alert_check} min in between that stays silent "
+            "and only pings if a balance is below threshold. "
             "A daily heartbeat proves the bot is alive.",
             parse_mode=ParseMode.HTML,
         )
@@ -508,10 +535,18 @@ def run_bot(cfg, state_path):
     first_delay = interval_s - (seconds_into_hour % interval_s)
     app.job_queue.run_repeating(bot.tick, interval=interval_s, first=first_delay, name="scan")
 
+    # Fast supplementary check between hourly scans: pings only when low.
+    alert_interval_s = cfg["intervals"]["alert_check_minutes"] * 60
+    alert_first = alert_interval_s - (seconds_into_hour % alert_interval_s)
+    app.job_queue.run_repeating(
+        bot.tick_alert, interval=alert_interval_s, first=alert_first, name="alert"
+    )
+
     logger.info(
-        "Starting bot: %d wallets, scan every %d min, chat %s",
+        "Starting bot: %d wallets, scan every %d min, fast low-only check every %d min, chat %s",
         len(cfg["wallets"]),
         cfg["intervals"]["check_minutes"],
+        cfg["intervals"]["alert_check_minutes"],
         cfg["allowed_chat_id"],
     )
     app.run_polling(allowed_updates=["message"])

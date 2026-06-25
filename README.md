@@ -5,6 +5,7 @@ Read-only Telegram bot that watches public wallet addresses (native BTC, ETH, SO
 What it does:
 - Checks every wallet every 30 minutes (configurable) using free public block explorer APIs. No API keys, no Fireblocks access, nothing that can move funds.
 - While a balance is below threshold it re-sends the LOW alert every scan, so it keeps pinging until topped up. On a healthy scan it posts a brief "all above threshold" confirmation, which is also how a recovery shows up.
+- Runs a second, faster check every `alert_check_minutes` (default 16) in between the main scans. This one stays silent when everything is healthy and only sends the LOW alert if a balance is below threshold, so a low hot wallet is caught faster than once a cycle without adding noise.
 - `/balances` scans all wallets on demand.
 - If it cannot read a balance twice in a row, it tells you monitoring is degraded rather than failing silently.
 - Optional daily heartbeat message so you know the bot itself is alive.
