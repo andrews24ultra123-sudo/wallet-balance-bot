@@ -19,6 +19,20 @@ heartbeat:
 # Set to false to alert "below threshold" without exact amounts in Telegram.
 show_amounts: true
 
+# Stuck-withdrawal watch. Every transaction from an Ethereum address shares one
+# nonce queue, so a single stuck (under-priced) transaction blocks all later ETH
+# and ERC-20 withdrawals from that address. This watches the mined-vs-pending
+# nonce gap and alerts (to the same chat and @tags as low-balance alerts) when the
+# queue stops draining. Read-only: it never moves or replaces anything.
+pending_alert:
+  enabled: true
+  check_minutes: 5       # how often to check
+  stuck_minutes: 10      # alert only once the queue has been stuck this long
+  realert_minutes: 30    # remind this often while it stays stuck
+  # addresses: leave empty to auto-watch every Ethereum (ETH/USDC/USDT) wallet
+  # listed below. Set explicit addresses only if you need to override that.
+  addresses: []
+
 # One entry per address to watch. Labels must be unique; thresholds are in the
 # asset's main unit (BTC, ETH, SOL, XRP, LTC). XRP balances are reported as
 # spendable (total minus the XRPL reserve).

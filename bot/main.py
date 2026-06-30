@@ -180,6 +180,114 @@ def build_topup_plan(results):
 
 
 # ---------------------------------------------------------------------------
+# Stuck / pending withdrawal detection
+
+
+def _assets_phrase(assets):
+    """'ETH', 'ETH and USDC', or 'ETH, USDC and USDT'."""
+    if not assets:
+        return ""
+    if len(assets) == 1:
+        return assets[0]
+    return ", ".join(assets[:-1]) + " and " + assets[-1]
+
+
+def build_pending_alert(entry, gap, minutes_stuck, tags=None, reminder=False):
+    """Alert that a wallet's withdrawal queue is stuck (transactions not clearing).
+
+    Alert-only: it tells the operator to act in Fireblocks. The bot never moves,
+    signs, or replaces anything itself.
+    """
+    label = _html.escape(entry["label"])  # full label; this is the alert's subject line
+    assets = entry.get("assets") or []
+    phrase = _assets_phrase(assets)
+    noun = "transaction" if gap == 1 else "transactions"
+    header = "STILL BLOCKED: stuck ETH transactions" if reminder else "WITHDRAWALS BLOCKED: stuck ETH transactions"
+    lines = [
+        f"<b>{header}</b>",
+        "",
+        label,
+        f"At least {gap} {noun} pending and not clearing.",
+        f"Stuck for about {minutes_stuck} minutes (mined nonce has not advanced).",
+    ]
+    if phrase:
+        verb = "is" if len(assets) == 1 else "are all"
+        lines.append(f"{phrase} withdrawals from this wallet {verb} blocked.")
+    lines += [
+        "",
+        "Action: in Fireblocks, drop-and-replace the oldest stuck transaction "
+        "(the lowest nonce) from this wallet to clear the queue.",
+    ]
+    tag_line = _tags_line(tags)
+    if tag_line:
+        lines += ["", tag_line]
+    return "\n".join(lines)
+
+
+def build_pending_cleared(entry):
+    """Confirmation that a previously-stuck queue has drained."""
+    label = _html.escape(entry["label"])
+    phrase = _assets_phrase(entry.get("assets") or [])
+    can = f" {phrase} withdrawals can go out." if phrase else ""
+    return (
+        "<b>Withdrawal queue cleared.</b>\n\n"
+        f"{label}: no pending transactions, mined nonce advancing again.{can}"
+    )
+
+
+def evaluate_pending(prev, latest, pending, now, stuck_minutes, realert_minutes):
+    """Decide what to do about an address's pending queue. Pure: no I/O.
+
+    prev: previous state dict for this address, or None.
+    latest / pending: mined and mempool-inclusive nonce.
+    now: epoch seconds.
+
+    Returns (action, new_state) where action is one of
+    None | "alert" | "realert" | "clear", and new_state is the dict to store for
+    this address, or None to clear the stored entry.
+    """
+    gap = pending - latest
+    if gap <= 0:
+        # Queue empty or drained.
+        if prev and prev.get("alerted"):
+            return "clear", None
+        return None, None
+
+    started = prev.get("first_seen_ts") if prev else None
+    base_nonce = prev.get("latest_nonce_at_first_seen") if prev else None
+    moving = started is None or base_nonce is None or latest > base_nonce
+    if moving:
+        if prev and prev.get("alerted"):
+            # We alerted on a stall and the mined nonce is advancing again: the
+            # blockage has cleared (even if some backlog is still draining).
+            # Confirm recovery and reset; a fresh stall starts a new clock.
+            return "clear", None
+        # New backlog, or the mined nonce advanced since we started timing: the
+        # front of the queue is being mined, so (re)start the clock; do not alert.
+        return None, {
+            "first_seen_ts": now,
+            "latest_nonce_at_first_seen": latest,
+            "alerted": False,
+            "last_alert_ts": None,
+        }
+
+    # Backlog present and the mined nonce has not advanced since first_seen.
+    new_state = dict(prev)
+    elapsed = now - started
+    if not prev.get("alerted"):
+        if elapsed >= stuck_minutes * 60:
+            new_state["alerted"] = True
+            new_state["last_alert_ts"] = now
+            return "alert", new_state
+        return None, new_state
+    last = prev.get("last_alert_ts") or started
+    if now - last >= realert_minutes * 60:
+        new_state["last_alert_ts"] = now
+        return "realert", new_state
+    return None, new_state
+
+
+# ---------------------------------------------------------------------------
 # Persistent state (fetch failure tracking and heartbeat date only)
 
 
@@ -244,6 +352,9 @@ class WalletBot:
         return await asyncio.to_thread(
             fetchers.get_balance, wallet["asset"], wallet["address"]
         )
+
+    async def fetch_gap(self, address):
+        return await asyncio.to_thread(fetchers.get_eth_pending_gap, address)
 
     async def tick(self, context):
         bot = context.bot
@@ -313,6 +424,59 @@ class WalletBot:
             show_amounts = self.cfg["show_amounts"]
             tags = self.cfg.get("alert_tags") or []
             await self.send(bot, build_low_alert(low, tags, show_amounts))
+
+    async def tick_pending(self, context):
+        """Watch each monitored EVM address for a stuck withdrawal queue.
+
+        Reads the mined-vs-pending nonce gap and alerts when the queue stops
+        draining. This job persists its own keys under state['_pending_tx'] and
+        calls save_state. It is safe alongside `tick`: the two run one at a time
+        on the same event loop and mutate disjoint state keys, so neither loses
+        the other's writes (do not reassign self.state wholesale in either job).
+        Strictly read-only on-chain: it never signs, sends, or replaces anything.
+        """
+        pa = self.cfg["pending_alert"]
+        bot = context.bot
+        tags = self.cfg.get("alert_tags") or []
+        stuck_minutes = pa["stuck_minutes"]
+        realert_minutes = pa["realert_minutes"]
+        pending_state = self.state.setdefault("_pending_tx", {})
+
+        for entry in pa["addresses"]:
+            address = entry["address"]
+            try:
+                gap_info = await self.fetch_gap(address)
+            except fetchers.FetchError as exc:
+                logger.warning("Pending check fetch failed (%s): %s", entry["label"], exc)
+                continue
+
+            now = datetime.now(timezone.utc).timestamp()
+            action, new_state = evaluate_pending(
+                pending_state.get(address),
+                gap_info["latest"],
+                gap_info["pending"],
+                now,
+                stuck_minutes,
+                realert_minutes,
+            )
+            if new_state is None:
+                pending_state.pop(address, None)
+            else:
+                pending_state[address] = new_state
+
+            if action in ("alert", "realert"):
+                minutes_stuck = max(0, int((now - new_state["first_seen_ts"]) // 60))
+                await self.send(
+                    bot,
+                    build_pending_alert(
+                        entry, gap_info["gap"], minutes_stuck, tags,
+                        reminder=(action == "realert"),
+                    ),
+                )
+            elif action == "clear":
+                await self.send(bot, build_pending_cleared(entry))
+
+        save_state(self.state_path, self.state)
 
     def heartbeat_due(self):
         """True if the daily heartbeat should fire on this tick (not yet sent today)."""
@@ -535,6 +699,35 @@ class WalletBot:
             parse_mode=ParseMode.HTML,
         )
 
+    async def cmd_pending(self, update, context):
+        """On-demand check of the monitored wallet(s) for stuck/pending withdrawals."""
+        pa = self.cfg["pending_alert"]
+        if not pa["addresses"]:
+            await update.message.reply_text(
+                "No Ethereum wallets are configured to check for stuck transactions.",
+                parse_mode=ParseMode.HTML,
+            )
+            return
+        await update.message.reply_text("Checking for stuck transactions...", parse_mode=ParseMode.HTML)
+        lines = ["<b>Pending transaction check</b>", ""]
+        for entry in pa["addresses"]:
+            label = _html.escape(entry["label"])
+            try:
+                gap_info = await self.fetch_gap(entry["address"])
+            except fetchers.FetchError:
+                lines += [f"{label}: could not read right now.", ""]
+                continue
+            if gap_info["gap"] > 0:
+                noun = "transaction" if gap_info["gap"] == 1 else "transactions"
+                lines += [
+                    f"{label}: at least {gap_info['gap']} {noun} pending.",
+                    f"Mined nonce {gap_info['latest']}, pending nonce {gap_info['pending']}.",
+                    "",
+                ]
+            else:
+                lines += [f"{label}: no pending backlog (mined nonce {gap_info['latest']}).", ""]
+        await update.message.reply_text("\n".join(lines).rstrip(), parse_mode=ParseMode.HTML)
+
     async def cmd_help(self, update, context):
         check = self.cfg["intervals"]["check_minutes"]
         alert_check = self.cfg["intervals"]["alert_check_minutes"]
@@ -547,11 +740,14 @@ class WalletBot:
             "/setthreshold &lt;asset or label&gt; &lt;amount&gt; - change a threshold\n"
             "/settarget &lt;asset or label&gt; &lt;amount&gt; - change a target\n"
             "/setalertcheck &lt;minutes&gt; - change the fast-check interval\n"
+            "/pending - check the hot wallet for stuck/pending withdrawals now\n"
             "/help - this message\n\n"
             f"Scans every {check} min. Pings with @tags every scan while any balance is below "
             "threshold, otherwise a brief all-clear when everything is above threshold. "
             f"Also runs a fast check every {alert_check} min in between that stays silent "
             "and only pings if a balance is below threshold. "
+            "Separately watches the ETH hot wallet for stuck/pending withdrawals and alerts "
+            "if the queue stops clearing. "
             "A daily heartbeat proves the bot is alive.",
             parse_mode=ParseMode.HTML,
         )
@@ -585,6 +781,8 @@ def run_bot(cfg, state_path):
     app.add_handler(CommandHandler("setthreshold", bot.cmd_setthreshold, filters=only_andrew))
     app.add_handler(CommandHandler("settarget", bot.cmd_settarget, filters=only_andrew))
     app.add_handler(CommandHandler("setalertcheck", bot.cmd_setalertcheck, filters=only_andrew))
+    app.add_handler(CommandHandler("pending", bot.cmd_pending, filters=only_andrew))
+    app.add_handler(CommandHandler("stuck", bot.cmd_pending, filters=only_andrew))
     app.add_handler(CommandHandler("help", bot.cmd_help, filters=only_andrew))
     app.add_handler(CommandHandler("start", bot.cmd_help, filters=only_andrew))
 
@@ -601,6 +799,20 @@ def run_bot(cfg, state_path):
     app.job_queue.run_repeating(
         bot.tick_alert, interval=alert_interval_s, first=alert_first, name="alert"
     )
+
+    # Stuck-withdrawal watch: alert if a monitored EVM wallet's pending queue
+    # stops draining. Skipped if disabled or no EVM wallets are configured.
+    pa = cfg["pending_alert"]
+    if pa["enabled"] and pa["addresses"]:
+        pending_interval_s = pa["check_minutes"] * 60
+        pending_first = pending_interval_s - (seconds_into_hour % pending_interval_s)
+        app.job_queue.run_repeating(
+            bot.tick_pending, interval=pending_interval_s, first=pending_first, name="pending"
+        )
+        logger.info(
+            "Stuck-withdrawal watch on %d address(es), every %d min (stuck after %d min)",
+            len(pa["addresses"]), pa["check_minutes"], pa["stuck_minutes"],
+        )
 
     logger.info(
         "Starting bot: %d wallets, scan every %d min, fast low-only check every %d min, chat %s",

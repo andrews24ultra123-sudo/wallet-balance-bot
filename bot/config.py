@@ -5,7 +5,7 @@ from decimal import Decimal, InvalidOperation
 
 import yaml
 
-from .fetchers import SUPPORTED_ASSETS
+from .fetchers import EVM_ASSETS, SUPPORTED_ASSETS
 
 
 class ConfigError(Exception):
@@ -16,6 +16,13 @@ DEFAULTS = {
     "intervals": {"check_minutes": 30, "alert_check_minutes": 16},
     "heartbeat": {"enabled": True, "time": "09:00", "timezone": "Asia/Singapore"},
     "show_amounts": True,
+    "pending_alert": {
+        "enabled": True,
+        "check_minutes": 5,
+        "stuck_minutes": 10,
+        "realert_minutes": 30,
+        "addresses": [],
+    },
 }
 
 
@@ -80,7 +87,76 @@ def load_config(path):
             "target": target,
         })
     cfg["wallets"] = parsed
+    cfg["pending_alert"] = _parse_pending_alert(raw.get("pending_alert"), parsed)
     return cfg
+
+
+def _parse_pending_alert(raw_pa, wallets):
+    """Build the stuck/pending-transaction alert config.
+
+    Defaults apply when the block is absent. The addresses to watch are either an
+    explicit `addresses` list, or (when that is empty) auto-derived from the
+    configured wallets that live on Ethereum, so the watch always tracks the same
+    EVM hot wallet(s) the bot already monitors. Each entry carries a display label
+    and the assets sharing that address, so the alert can name them.
+    """
+    raw_pa = raw_pa or {}
+    pa = {**DEFAULTS["pending_alert"], **raw_pa}
+
+    def _pos_int(key, minimum):
+        try:
+            value = int(pa[key])
+        except (TypeError, ValueError):
+            raise ConfigError(f"pending_alert.{key} must be a whole number of minutes: {pa[key]!r}")
+        if value < minimum:
+            raise ConfigError(f"pending_alert.{key} must be at least {minimum}.")
+        return value
+
+    enabled = bool(pa.get("enabled", True))
+    check_minutes = _pos_int("check_minutes", 1)
+    stuck_minutes = _pos_int("stuck_minutes", 0)
+    realert_minutes = _pos_int("realert_minutes", 1)
+
+    # Group the EVM wallets by address: assets sharing it, and a display label.
+    by_address = {}
+    for w in wallets:
+        if w["asset"] not in EVM_ASSETS:
+            continue
+        key = w["address"].lower()
+        info = by_address.setdefault(
+            key, {"address": w["address"], "assets": [], "labels": [], "eth_label": None}
+        )
+        if w["asset"] not in info["assets"]:
+            info["assets"].append(w["asset"])
+        info["labels"].append(w["label"])
+        if w["asset"] == "ETH" and info["eth_label"] is None:
+            info["eth_label"] = w["label"]
+
+    explicit = pa.get("addresses") or []
+    if explicit:
+        targets = []
+        for addr in explicit:
+            info = by_address.get(str(addr).lower())
+            targets.append(
+                info or {"address": str(addr), "assets": [], "labels": [], "eth_label": None}
+            )
+    else:
+        targets = list(by_address.values())
+
+    addresses = []
+    for info in targets:
+        label = info["eth_label"] or (info["labels"][0] if info["labels"] else info["address"])
+        addresses.append(
+            {"address": info["address"], "label": label, "assets": sorted(info["assets"])}
+        )
+
+    return {
+        "enabled": enabled,
+        "check_minutes": check_minutes,
+        "stuck_minutes": stuck_minutes,
+        "realert_minutes": realert_minutes,
+        "addresses": addresses,
+    }
 
 
 def _save_wallet_value(cfg, label, key, value):

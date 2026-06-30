@@ -187,3 +187,77 @@ def get_balance(asset, address):
         except Exception as exc:  # noqa: BLE001 - record and try the fallback
             errors.append(f"{fetcher.__name__}: {exc}")
     raise FetchError(f"{asset} {address}: all endpoints failed: {'; '.join(errors)}")
+
+
+# ---------------------------------------------------------------------------
+# Pending / stuck transaction detection (Ethereum and ERC-20)
+#
+# Every transaction from an Ethereum address consumes the same sequential nonce,
+# whether it moves native ETH or an ERC-20 token, so one stuck (unmined)
+# transaction blocks every later withdrawal from that address. We detect that by
+# comparing the mined nonce ("latest") with the mempool-inclusive nonce
+# ("pending"): a persistent, non-advancing gap means the queue is not draining.
+# Read-only: this never signs or sends anything.
+
+# The ETH JSON-RPC endpoints the balance fetchers already use, reused here.
+ETH_RPC_ENDPOINTS = ("https://ethereum-rpc.publicnode.com", "https://eth.drpc.org")
+
+# Assets that live on Ethereum and therefore share an address's nonce queue.
+EVM_ASSETS = frozenset({"ETH", *_ERC20_CONTRACTS})
+
+
+def _eth_nonce(url, address, block_tag):
+    """Transaction count for an address at a block tag ('latest' or 'pending')."""
+    data = _post_json(url, {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "eth_getTransactionCount",
+        "params": [address, block_tag],
+    })
+    if "result" not in data:
+        raise FetchError(f"RPC error from {url}: {data.get('error')}")
+    return int(data["result"], 16)
+
+
+def get_eth_nonce_pair(address, url):
+    """(latest, pending) nonce from one endpoint, so the gap is internally consistent."""
+    latest = _eth_nonce(url, address, "latest")
+    pending = _eth_nonce(url, address, "pending")
+    return latest, pending
+
+
+def get_eth_pending_gap(address, endpoints=ETH_RPC_ENDPOINTS):
+    """Probe every endpoint and return the most pessimistic view of the queue.
+
+    Returns a dict: latest (max mined nonce seen), gap (max pending backlog seen,
+    floored at 0), pending (latest + gap), endpoints_ok, endpoints_total. Taking
+    the max gap guards against a single node with an incomplete mempool hiding a
+    stuck transaction. Raises FetchError only if every endpoint fails.
+    """
+    best_latest = None
+    best_gap = 0
+    ok = 0
+    errors = []
+    for url in endpoints:
+        try:
+            latest, pending = get_eth_nonce_pair(address, url)
+        except Exception as exc:  # noqa: BLE001 - record and try the next endpoint
+            errors.append(f"{url}: {exc}")
+            continue
+        ok += 1
+        gap = pending - latest
+        if gap < 0:
+            gap = 0
+        if best_latest is None or latest > best_latest:
+            best_latest = latest
+        if gap > best_gap:
+            best_gap = gap
+    if ok == 0:
+        raise FetchError(f"nonce {address}: all endpoints failed: {'; '.join(errors)}")
+    return {
+        "latest": best_latest,
+        "pending": best_latest + best_gap,
+        "gap": best_gap,
+        "endpoints_ok": ok,
+        "endpoints_total": len(endpoints),
+    }
