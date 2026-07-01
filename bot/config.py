@@ -21,6 +21,7 @@ DEFAULTS = {
         "check_minutes": 5,
         "stuck_minutes": 10,
         "realert_minutes": 30,
+        "allclear_hours": 4,
         "addresses": [],
     },
 }
@@ -116,6 +117,7 @@ def _parse_pending_alert(raw_pa, wallets):
     check_minutes = _pos_int("check_minutes", 1)
     stuck_minutes = _pos_int("stuck_minutes", 0)
     realert_minutes = _pos_int("realert_minutes", 1)
+    allclear_hours = _pos_int("allclear_hours", 0)  # 0 = no periodic all-clear
 
     # Group the EVM wallets by address: assets sharing it, and a display label.
     by_address = {}
@@ -155,6 +157,7 @@ def _parse_pending_alert(raw_pa, wallets):
         "check_minutes": check_minutes,
         "stuck_minutes": stuck_minutes,
         "realert_minutes": realert_minutes,
+        "allclear_hours": allclear_hours,
         "addresses": addresses,
     }
 

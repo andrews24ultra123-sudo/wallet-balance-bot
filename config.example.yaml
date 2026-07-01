@@ -29,6 +29,7 @@ pending_alert:
   check_minutes: 5       # how often to check
   stuck_minutes: 10      # alert only once the queue has been stuck this long
   realert_minutes: 30    # remind this often while it stays stuck
+  allclear_hours: 4      # periodic "no stuck withdrawals" confirmation in hours (0 = off); also summarised in the daily heartbeat
   # addresses: leave empty to auto-watch every Ethereum (ETH/USDC/USDT) wallet
   # listed below. Set explicit addresses only if you need to override that.
   addresses: []

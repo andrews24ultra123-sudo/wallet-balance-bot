@@ -17,8 +17,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from bot.main import (  # noqa: E402
     _assets_phrase,
+    _pending_status_line,
     build_pending_alert,
+    build_pending_allclear,
     build_pending_cleared,
+    build_pending_summary,
+    evaluate_allclear,
     evaluate_pending,
 )
 
@@ -145,6 +149,63 @@ def test_build_pending_cleared_content():
     assert "Withdrawal queue cleared." in text
     assert "ETH hot wallet" in text
     assert "advancing again" in text
+
+
+# -- evaluate_allclear: periodic 'no stuck withdrawals' confirmation ---------
+
+H = 3600  # seconds per hour
+ALLCLEAR = 4  # hours
+
+
+def test_allclear_disabled_never_sends():
+    send, last = evaluate_allclear(0.0, 100 * H, 0, True, False)
+    assert send is False and last == 0.0
+
+
+def test_allclear_activity_rebases_without_sending():
+    send, last = evaluate_allclear(0.0, 5 * H, ALLCLEAR, True, True)
+    assert send is False and last == 5 * H
+
+
+def test_allclear_not_clear_holds_timer():
+    send, last = evaluate_allclear(0.0, 5 * H, ALLCLEAR, False, False)
+    assert send is False and last == 0.0
+
+
+def test_allclear_first_observation_starts_clock_silently():
+    send, last = evaluate_allclear(None, 2 * H, ALLCLEAR, True, False)
+    assert send is False and last == 2 * H
+
+
+def test_allclear_not_due_holds():
+    send, last = evaluate_allclear(0.0, 3 * H, ALLCLEAR, True, False)
+    assert send is False and last == 0.0
+
+
+def test_allclear_fires_when_due():
+    send, last = evaluate_allclear(0.0, 4 * H, ALLCLEAR, True, False)
+    assert send is True and last == 4 * H
+
+
+# -- pending status / summary / all-clear builders ---------------------------
+
+
+def test_pending_status_line_variants():
+    entry = {"label": "ETH hot wallet", "assets": ["ETH", "USDC", "USDT"]}
+    assert _pending_status_line(entry, {"gap": 0, "latest": 952}) == "ETH hot wallet: clear (mined nonce 952)"
+    assert _pending_status_line(entry, {"gap": 1, "latest": 952}) == "ETH hot wallet: 1 transaction pending (mined nonce 952)"
+    assert _pending_status_line(entry, {"gap": 3, "latest": 952}) == "ETH hot wallet: 3 transactions pending (mined nonce 952)"
+    assert _pending_status_line(entry, None) == "ETH hot wallet: queue status unavailable"
+
+
+def test_build_pending_summary_and_allclear():
+    statuses = [({"label": "ETH hot wallet", "assets": ["ETH"]}, {"gap": 0, "latest": 952})]
+    summary = build_pending_summary(statuses)
+    assert "Withdrawal queue" in summary
+    assert "ETH hot wallet: clear (mined nonce 952)" in summary
+    allclear = build_pending_allclear(statuses)
+    assert "No stuck withdrawals." in allclear
+    assert "ETH hot wallet: clear (mined nonce 952)" in allclear
 
 
 def _run_all():

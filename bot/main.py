@@ -235,6 +235,33 @@ def build_pending_cleared(entry):
     )
 
 
+def _pending_status_line(entry, info):
+    """One line describing a wallet's current queue status. info is a gap dict or None."""
+    label = _html.escape(entry["label"])
+    if info is None:
+        return f"{label}: queue status unavailable"
+    if info["gap"] > 0:
+        noun = "transaction" if info["gap"] == 1 else "transactions"
+        return f"{label}: {info['gap']} {noun} pending (mined nonce {info['latest']})"
+    return f"{label}: clear (mined nonce {info['latest']})"
+
+
+def build_pending_summary(statuses):
+    """Compact queue-status block for the daily heartbeat. statuses: [(entry, info_or_None)]."""
+    lines = ["<b>Withdrawal queue</b>"]
+    for entry, info in statuses:
+        lines.append(_pending_status_line(entry, info))
+    return "\n".join(lines)
+
+
+def build_pending_allclear(statuses):
+    """Standalone periodic confirmation that no withdrawals are stuck."""
+    lines = ["<b>No stuck withdrawals.</b>", ""]
+    for entry, info in statuses:
+        lines.append(_pending_status_line(entry, info))
+    return "\n".join(lines)
+
+
 def evaluate_pending(prev, latest, pending, now, stuck_minutes, realert_minutes):
     """Decide what to do about an address's pending queue. Pure: no I/O.
 
@@ -285,6 +312,27 @@ def evaluate_pending(prev, latest, pending, now, stuck_minutes, realert_minutes)
         new_state["last_alert_ts"] = now
         return "realert", new_state
     return None, new_state
+
+
+def evaluate_allclear(last_ts, now, allclear_hours, all_clear, activity):
+    """Decide whether to send the periodic 'no stuck withdrawals' confirmation. Pure.
+
+    Returns (should_send, new_last_ts). Sends only when the queue is fully clear,
+    nothing fired this cycle, and at least allclear_hours have passed since the last
+    confirmation. On activity (a stuck alert/reminder/cleared) or the first healthy
+    observation it rebases the timer without sending, to avoid spam.
+    """
+    if not allclear_hours:
+        return False, last_ts
+    if activity:
+        return False, now
+    if not all_clear:
+        return False, last_ts
+    if last_ts is None:
+        return False, now
+    if now - last_ts >= allclear_hours * 3600:
+        return True, now
+    return False, last_ts
 
 
 # ---------------------------------------------------------------------------
@@ -355,6 +403,17 @@ class WalletBot:
 
     async def fetch_gap(self, address):
         return await asyncio.to_thread(fetchers.get_eth_pending_gap, address)
+
+    async def pending_statuses(self):
+        """Live queue status for each monitored address: [(entry, gap_info_or_None)]."""
+        out = []
+        for entry in self.cfg["pending_alert"]["addresses"]:
+            try:
+                info = await self.fetch_gap(entry["address"])
+            except fetchers.FetchError:
+                info = None
+            out.append((entry, info))
+        return out
 
     async def tick(self, context):
         bot = context.bot
@@ -441,6 +500,9 @@ class WalletBot:
         stuck_minutes = pa["stuck_minutes"]
         realert_minutes = pa["realert_minutes"]
         pending_state = self.state.setdefault("_pending_tx", {})
+        now = datetime.now(timezone.utc).timestamp()
+        statuses = []      # (entry, gap_info) for addresses successfully read this cycle
+        activity = False   # a stuck alert, reminder, or cleared message fired this cycle
 
         for entry in pa["addresses"]:
             address = entry["address"]
@@ -449,8 +511,8 @@ class WalletBot:
             except fetchers.FetchError as exc:
                 logger.warning("Pending check fetch failed (%s): %s", entry["label"], exc)
                 continue
+            statuses.append((entry, gap_info))
 
-            now = datetime.now(timezone.utc).timestamp()
             action, new_state = evaluate_pending(
                 pending_state.get(address),
                 gap_info["latest"],
@@ -465,6 +527,7 @@ class WalletBot:
                 pending_state[address] = new_state
 
             if action in ("alert", "realert"):
+                activity = True
                 minutes_stuck = max(0, int((now - new_state["first_seen_ts"]) // 60))
                 await self.send(
                     bot,
@@ -474,7 +537,18 @@ class WalletBot:
                     ),
                 )
             elif action == "clear":
+                activity = True
                 await self.send(bot, build_pending_cleared(entry))
+
+        # Periodic positive confirmation that the queue is flowing (only when every
+        # monitored address was read and is clear, and nothing fired this cycle).
+        all_clear = len(statuses) == len(pa["addresses"]) and all(info["gap"] == 0 for _, info in statuses)
+        send_allclear, new_last = evaluate_allclear(
+            self.state.get("_pending_allclear_ts"), now, pa.get("allclear_hours") or 0, all_clear, activity
+        )
+        self.state["_pending_allclear_ts"] = new_last
+        if send_allclear:
+            await self.send(bot, build_pending_allclear(statuses))
 
         save_state(self.state_path, self.state)
 
@@ -496,7 +570,11 @@ class WalletBot:
         now = datetime.now(ZoneInfo(self.cfg["heartbeat"]["timezone"]))
         self.state["_last_heartbeat"] = now.date().isoformat()
         date_str = now.strftime("%d %b %Y")
-        await self.send(bot, await self.scan_text(title=f"Daily heartbeat: {date_str}"))
+        text = await self.scan_text(title=f"Daily heartbeat: {date_str}")
+        pa = self.cfg["pending_alert"]
+        if pa["enabled"] and pa["addresses"]:
+            text += "\n\n" + build_pending_summary(await self.pending_statuses())
+        await self.send(bot, text)
 
     async def fetch_all(self):
         """Fetch every wallet's balance: list of (wallet, balance_or_None, error_or_None)."""
@@ -747,7 +825,8 @@ class WalletBot:
             f"Also runs a fast check every {alert_check} min in between that stays silent "
             "and only pings if a balance is below threshold. "
             "Separately watches the ETH hot wallet for stuck/pending withdrawals and alerts "
-            "if the queue stops clearing. "
+            "if the queue stops clearing, and confirms it is clear in the daily heartbeat and "
+            "periodically. "
             "A daily heartbeat proves the bot is alive.",
             parse_mode=ParseMode.HTML,
         )
