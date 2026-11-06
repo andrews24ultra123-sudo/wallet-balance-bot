@@ -41,12 +41,11 @@ def short_addr(address):
     return f"{address[:6]}...{address[-4:]}"
 
 
-def display_label(label):
-    """Drop a redundant ' hot wallet' suffix for display; they are all hot wallets."""
-    suffix = " hot wallet"
-    if label.lower().endswith(suffix):
-        return label[: -len(suffix)].strip() or label
-    return label
+def display_name(wallet):
+    """Short name for messages: the asset alone on its own chain (BTC, ETH, TRX),
+    otherwise asset and chain, e.g. 'USDT (TRX)', so two USDT wallets are told apart."""
+    asset, chain = wallet["asset"], wallet["chain"]
+    return asset if asset == chain else f"{asset} ({chain})"
 
 
 def pre_table(field_names, rows):
@@ -81,7 +80,7 @@ def build_low_alert(low_wallets, tags=None, show_amounts=True):
     lines = ["<b>LOW BALANCE</b>", ""]
     for wallet, balance in low_wallets:
         asset = wallet["asset"]
-        label = _html.escape(display_label(wallet["label"]))
+        label = _html.escape(display_name(wallet))
         lines.append(f"{label}")
         if show_amounts:
             lines.append(f"Balance:   {fmt_amount(balance)} {asset}")
@@ -103,34 +102,35 @@ def build_scan(results, title="Wallet balances", show_amounts=True):
 
     Renders a borderless, column-aligned table inside a <pre> block (Telegram
     shows <pre> in a monospace font, so the columns line up). A status emoji is
-    appended after each row, outside the aligned columns so it can't skew them.
+    appended after each row, outside the aligned columns so it can't skew them;
+    it is the only status marker, which keeps the table narrow enough for a phone.
     """
     from prettytable import PrettyTable
 
     table = PrettyTable()
     table.border = False
     table.align = "l"
-    table.field_names = ["Asset", "Balance", "Full", "St"] if show_amounts else ["Asset", "St"]
+    table.field_names = ["Asset", "Chain", "Balance", "Full"] if show_amounts else ["Asset", "Chain"]
 
     badges = []
     topups = []
     for wallet, balance, error in results:
-        label = display_label(wallet["label"])  # raw; the whole table is escaped below
+        asset, chain = wallet["asset"], wallet["chain"]  # raw; the whole table is escaped below
         if error:
             badges.append("⚠️")
-            table.add_row([label, "fetch failed", "", "?"] if show_amounts else [label, "?"])
+            table.add_row([asset, chain, "fetch failed", ""] if show_amounts else [asset, chain])
             continue
-        status = "LOW" if balance < wallet["threshold"] else "OK"
-        badges.append("✅" if status == "OK" else "❌")
+        low = balance < wallet["threshold"]
+        badges.append("❌" if low else "✅")
         if show_amounts:
             full = f"{balance / wallet['target'] * 100:.1f}%" if wallet.get("target") else ""
-            table.add_row([label, fmt_amount(balance), full, status])
-            if status == "LOW":
+            table.add_row([asset, chain, fmt_amount(balance), full])
+            if low:
                 tu = _topup_line(wallet, balance)
                 if tu:
-                    topups.append(f"  {_html.escape(label)}: {tu.split(':', 1)[1].strip()}")
+                    topups.append(f"  {_html.escape(display_name(wallet))}: {tu.split(':', 1)[1].strip()}")
         else:
-            table.add_row([label, status])
+            table.add_row([asset, chain])
 
     # First output line is the header; data rows follow in insertion order.
     # Pad every row to a common width so the trailing emoji line up in a column.
@@ -158,22 +158,22 @@ def build_topup_plan(results):
     rows = []
     any_needed = False
     for wallet, balance, error in results:
-        label = display_label(wallet["label"])
+        asset, chain = wallet["asset"], wallet["chain"]
         if error:
-            rows.append([label, "fetch failed", "", ""])
+            rows.append([asset, chain, "fetch failed", "", ""])
             continue
         target = wallet.get("target")
         if not target:
-            rows.append([label, "no target", fmt_amount(balance), ""])
+            rows.append([asset, chain, "no target", fmt_amount(balance), ""])
             continue
         topup = target - balance
         if topup > 0:
             any_needed = True
-            rows.append([label, f"+{fmt_amount(topup)}", fmt_amount(balance), fmt_amount(target)])
+            rows.append([asset, chain, f"+{fmt_amount(topup)}", fmt_amount(balance), fmt_amount(target)])
         else:
-            rows.append([label, "at target", fmt_amount(balance), fmt_amount(target)])
+            rows.append([asset, chain, "at target", fmt_amount(balance), fmt_amount(target)])
 
-    lines = ["<b>Top-up to target</b>", "", pre_table(["Asset", "Top up", "Current", "Target"], rows)]
+    lines = ["<b>Top-up to target</b>", "", pre_table(["Asset", "Chain", "Top up", "Current", "Target"], rows)]
     if not any_needed:
         lines += ["", "All wallets are at or above target. Nothing to top up."]
     return "\n".join(lines)
@@ -365,10 +365,13 @@ def run_check(cfg):
     failures = 0
     for wallet in cfg["wallets"]:
         try:
-            balance = fetchers.get_balance(wallet["asset"], wallet["address"])
+            balance = fetchers.get_balance(wallet["asset"], wallet["address"], wallet["chain"])
             asset = wallet["asset"]
             status = "LOW" if balance < wallet["threshold"] else "OK "
-            line = f"[{status}] {wallet['label']}: {fmt_amount(balance)} {asset}  (threshold {fmt_amount(wallet['threshold'])})"
+            line = (
+                f"[{status}] {wallet['label']} ({asset} on {wallet['chain']}): "
+                f"{fmt_amount(balance)} {asset}  (threshold {fmt_amount(wallet['threshold'])})"
+            )
             tu = _topup_line(wallet, balance)
             if tu and status.strip() == "LOW":
                 line += f"\n       {tu}"
@@ -398,7 +401,7 @@ class WalletBot:
 
     async def fetch(self, wallet):
         return await asyncio.to_thread(
-            fetchers.get_balance, wallet["asset"], wallet["address"]
+            fetchers.get_balance, wallet["asset"], wallet["address"], wallet["chain"]
         )
 
     async def fetch_gap(self, address):
@@ -428,7 +431,7 @@ class WalletBot:
                 logger.warning("Fetch failed (%s consecutive): %s", ws["fetch_failures"], exc)
                 if ws["fetch_failures"] >= 2 and not ws["degraded_alerted"]:
                     ws["degraded_alerted"] = True
-                    label = _html.escape(display_label(wallet["label"]))
+                    label = _html.escape(display_name(wallet))
                     await self.send(
                         bot,
                         f"<b>Monitoring degraded:</b> {label}\n\n"
@@ -438,7 +441,7 @@ class WalletBot:
                 continue
 
             if ws["degraded_alerted"]:
-                label = _html.escape(display_label(wallet["label"]))
+                label = _html.escape(display_name(wallet))
                 await self.send(bot, f"<b>Monitoring restored:</b> {label}")
             ws["fetch_failures"] = 0
             ws["degraded_alerted"] = False
@@ -608,13 +611,14 @@ class WalletBot:
     async def cmd_thresholds(self, update, context):
         rows = [
             [
-                display_label(w["label"]),
+                w["asset"],
+                w["chain"],
                 fmt_amount(w["threshold"]),
                 fmt_amount(w["target"]) if w.get("target") else "-",
             ]
             for w in self.cfg["wallets"]
         ]
-        text = "<b>Thresholds</b>\n\n" + pre_table(["Asset", "Threshold", "Target"], rows)
+        text = "<b>Thresholds</b>\n\n" + pre_table(["Asset", "Chain", "Threshold", "Target"], rows)
         await update.message.reply_text(text, parse_mode=ParseMode.HTML)
 
     async def cmd_setthreshold(self, update, context):
@@ -622,7 +626,8 @@ class WalletBot:
         if len(args) < 2:
             await update.message.reply_text(
                 "Usage: /setthreshold &lt;asset or label&gt; &lt;amount&gt;\n"
-                "Example: /setthreshold ETH 24",
+                "Example: /setthreshold ETH 24\n"
+                "Asset on two chains: /setthreshold USDT TRX 2000",
                 parse_mode=ParseMode.HTML,
             )
             return
@@ -637,9 +642,10 @@ class WalletBot:
             await update.message.reply_text(f"No wallet matches '{_html.escape(key)}'. See /thresholds.", parse_mode=ParseMode.HTML)
             return
         if len(matches) > 1:
-            labels = ", ".join(_html.escape(display_label(w["label"])) for w in matches)
+            labels = ", ".join(_html.escape(display_name(w)) for w in matches)
             await update.message.reply_text(
-                f"'{_html.escape(key)}' matches several wallets ({labels}). Use the exact label.",
+                f"'{_html.escape(key)}' matches several wallets ({labels}). "
+                "Add the chain (e.g. USDT TRX) or use the exact label.",
                 parse_mode=ParseMode.HTML,
             )
             return
@@ -657,7 +663,7 @@ class WalletBot:
             return
         save_threshold(self.cfg, wallet["label"], amount)
         asset = wallet["asset"]
-        label = _html.escape(display_label(wallet["label"]))
+        label = _html.escape(display_name(wallet))
         await update.message.reply_text(
             f"Threshold updated: {label}\n"
             f"New threshold: {fmt_amount(amount)} {asset}",
@@ -666,10 +672,10 @@ class WalletBot:
 
     async def cmd_targets(self, update, context):
         rows = [
-            [display_label(w["label"]), fmt_amount(w["target"]) if w.get("target") else "no target"]
+            [w["asset"], w["chain"], fmt_amount(w["target"]) if w.get("target") else "no target"]
             for w in self.cfg["wallets"]
         ]
-        text = "<b>Targets</b>\n\n" + pre_table(["Asset", "Target"], rows)
+        text = "<b>Targets</b>\n\n" + pre_table(["Asset", "Chain", "Target"], rows)
         await update.message.reply_text(text, parse_mode=ParseMode.HTML)
 
     async def cmd_settarget(self, update, context):
@@ -677,7 +683,8 @@ class WalletBot:
         if len(args) < 2:
             await update.message.reply_text(
                 "Usage: /settarget &lt;asset or label&gt; &lt;amount&gt;\n"
-                "Example: /settarget BTC 2.0",
+                "Example: /settarget BTC 2.0\n"
+                "Asset on two chains: /settarget USDT TRX 10000",
                 parse_mode=ParseMode.HTML,
             )
             return
@@ -692,9 +699,10 @@ class WalletBot:
             await update.message.reply_text(f"No wallet matches '{_html.escape(key)}'. See /targets.", parse_mode=ParseMode.HTML)
             return
         if len(matches) > 1:
-            labels = ", ".join(_html.escape(display_label(w["label"])) for w in matches)
+            labels = ", ".join(_html.escape(display_name(w)) for w in matches)
             await update.message.reply_text(
-                f"'{_html.escape(key)}' matches several wallets ({labels}). Use the exact label.",
+                f"'{_html.escape(key)}' matches several wallets ({labels}). "
+                "Add the chain (e.g. USDT TRX) or use the exact label.",
                 parse_mode=ParseMode.HTML,
             )
             return
@@ -712,7 +720,7 @@ class WalletBot:
             return
         save_target(self.cfg, wallet["label"], amount)
         asset = wallet["asset"]
-        label = _html.escape(display_label(wallet["label"]))
+        label = _html.escape(display_name(wallet))
         await update.message.reply_text(
             f"Target updated: {label}\n"
             f"New target: {fmt_amount(amount)} {asset}",
@@ -817,6 +825,7 @@ class WalletBot:
             "/targets - show targets\n"
             "/setthreshold &lt;asset or label&gt; &lt;amount&gt; - change a threshold\n"
             "/settarget &lt;asset or label&gt; &lt;amount&gt; - change a target\n"
+            "   (USDT is on two chains: add the chain, e.g. /setthreshold USDT TRX 2000)\n"
             "/setalertcheck &lt;minutes&gt; - change the fast-check interval\n"
             "/pending - check the hot wallet for stuck/pending withdrawals now\n"
             "/help - this message\n\n"

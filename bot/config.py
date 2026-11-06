@@ -5,7 +5,15 @@ from decimal import Decimal, InvalidOperation
 
 import yaml
 
-from .fetchers import EVM_ASSETS, SUPPORTED_ASSETS
+from .fetchers import (
+    DEFAULT_CHAIN,
+    EVM_CHAINS,
+    FETCHERS,
+    SUPPORTED_ASSETS,
+    SUPPORTED_PAIRS,
+    normalise_chain,
+    tron_address_bytes,
+)
 
 
 class ConfigError(Exception):
@@ -67,6 +75,18 @@ def load_config(path):
             raise ConfigError(f"Wallet entry needs label, asset, address, threshold: {w}")
         if asset not in SUPPORTED_ASSETS:
             raise ConfigError(f"Unsupported asset '{asset}' (supported: {', '.join(SUPPORTED_ASSETS)})")
+        raw_chain = w.get("chain")
+        chain = normalise_chain(raw_chain) if raw_chain else DEFAULT_CHAIN[asset]
+        if chain is None:
+            raise ConfigError(f"Unknown chain '{raw_chain}' for '{label}'.")
+        if (asset, chain) not in FETCHERS:
+            pairs = ", ".join(f"{a} on {c}" for a, c in SUPPORTED_PAIRS)
+            raise ConfigError(f"Unsupported asset and chain '{asset} on {chain}' for '{label}' (supported: {pairs})")
+        if chain == "TRX":
+            try:
+                tron_address_bytes(str(address))
+            except ValueError as exc:
+                raise ConfigError(f"Tron address for '{label}' is not valid: {exc}")
         if label in seen_labels:
             raise ConfigError(f"Duplicate wallet label '{label}'. Labels must be unique.")
         seen_labels.add(label)
@@ -83,6 +103,7 @@ def load_config(path):
         parsed.append({
             "label": label,
             "asset": asset,
+            "chain": chain,
             "address": address,
             "threshold": threshold,
             "target": target,
@@ -119,10 +140,11 @@ def _parse_pending_alert(raw_pa, wallets):
     realert_minutes = _pos_int("realert_minutes", 1)
     allclear_hours = _pos_int("allclear_hours", 0)  # 0 = no periodic all-clear
 
-    # Group the EVM wallets by address: assets sharing it, and a display label.
+    # Group the Ethereum wallets by address: assets sharing it, and a display label.
+    # Filtered by chain, so a USDT wallet on Tron is never watched here.
     by_address = {}
     for w in wallets:
-        if w["asset"] not in EVM_ASSETS:
+        if w["chain"] not in EVM_CHAINS:
             continue
         key = w["address"].lower()
         info = by_address.setdefault(
@@ -204,8 +226,17 @@ def save_interval(cfg, key, minutes):
 
 
 def find_wallets(cfg, key):
-    """Match wallets by exact label first, then by asset symbol."""
+    """Match wallets by exact label first, then by asset and chain, then by asset.
+
+    Asset and chain can be written 'USDT TRX', 'USDT-TRX', 'USDT/TRX',
+    'USDT (TRX)' or 'USDT tron', which picks one row when an asset is on two chains.
+    """
     by_label = [w for w in cfg["wallets"] if w["label"].lower() == key.lower()]
     if by_label:
         return by_label
+    parts = key.replace("-", " ").replace("/", " ").replace("(", " ").replace(")", " ").split()
+    if len(parts) == 2:
+        asset, chain = parts[0].upper(), normalise_chain(parts[1])
+        if chain:
+            return [w for w in cfg["wallets"] if w["asset"] == asset and w["chain"] == chain]
     return [w for w in cfg["wallets"] if w["asset"] == key.upper()]

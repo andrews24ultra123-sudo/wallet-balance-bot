@@ -1,6 +1,6 @@
 # Wallet Balance Bot
 
-Read-only Telegram bot that watches public wallet addresses (native BTC, ETH, SOL, XRP, LTC) and alerts when a balance drops below its threshold.
+Read-only Telegram bot that watches public wallet addresses (native BTC, ETH, SOL, XRP, LTC and TRX; USDT and USDC on Ethereum; USDT on Tron) and alerts when a balance drops below its threshold. Each balance is shown with its chain, so the same asset on two chains appears as two rows.
 
 What it does:
 - Checks every wallet every 30 minutes (configurable) using free public block explorer APIs. No API keys, no Fireblocks access, nothing that can move funds.
@@ -20,7 +20,13 @@ Commands (the bot only answers the configured chat id):
 - `/setalertcheck <minutes>` - change the fast-check interval (persisted to config.yaml, takes effect immediately)
 - `/help`
 
+For an asset on more than one chain, add the chain to pick one row: `/setthreshold USDT TRX 2000` (also `USDT-TRX`, `USDT (TRX)` or `USDT tron`). `USDT` alone matches both rows and the bot asks which.
+
+Chains: each wallet entry can carry `chain:` (BTC, ETH, SOL, XRP, LTC, TRX, or the full name). Left out, USDT and USDC mean Ethereum, so configs written before chains existed work unchanged. Tron addresses are checked when the config loads, so a typo stops the bot with a clear error. The stuck-withdrawal watch covers Ethereum wallets only.
+
 XRP note: balances are reported as spendable, i.e. total minus the XRPL reserve (1 XRP base + 0.2 per owned object), because the reserve cannot fund withdrawals.
+
+TRX note: the TRX balance is liquid TRX only; any staked TRX is excluded. TRX also pays the network fee for USDT-on-Tron withdrawals, so set the TRX threshold with those fees in mind. Tron balances come from TronGrid, with PublicNode as the fallback, both without an API key.
 
 ## Setup
 

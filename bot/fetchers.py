@@ -1,10 +1,11 @@
 """Read-only balance lookups against free public APIs.
 
-Each asset has a primary and a fallback endpoint. All amounts are returned
-as Decimal in the asset's main unit (BTC, ETH, SOL, XRP, LTC, USDC, USDT),
-never floats. No API keys are used anywhere.
+Each (asset, chain) pair has a primary and a fallback endpoint. All amounts are
+returned as Decimal in the asset's main unit (BTC, ETH, SOL, XRP, LTC, TRX,
+USDC, USDT), never floats. No API keys are used anywhere.
 """
 
+import hashlib
 from decimal import Decimal
 
 import requests
@@ -162,31 +163,167 @@ def _make_erc20_fetchers(symbol):
     return [_primary, _fallback]
 
 
-FETCHERS = {
-    "BTC": [_btc_mempool_space, _btc_blockstream],
-    "ETH": [_eth_publicnode, _eth_drpc],
-    "SOL": [_sol_mainnet, _sol_publicnode],
-    "XRP": [_xrp_cluster, _xrp_ripple_s1],
-    "LTC": [_ltc_litecoinspace, _ltc_blockcypher],
-    "USDC": _make_erc20_fetchers("USDC"),
-    "USDT": _make_erc20_fetchers("USDT"),
+# ---------------------------------------------------------------------------
+# Tron (native TRX and TRC-20 tokens), via the Tron full-node HTTP API.
+# TronGrid is primary, PublicNode the fallback; both answer without an API key.
+
+TRON_ENDPOINTS = ("https://api.trongrid.io", "https://tron-rpc.publicnode.com")
+
+_B58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+
+
+def tron_address_bytes(address):
+    """Decode a Tron base58check address to its 21 raw bytes (0x41 + account id).
+
+    Raises ValueError if it is not a valid Tron mainnet address (bad character,
+    wrong length, failed checksum or wrong prefix), so a typo is caught.
+    """
+    num = 0
+    for char in address:
+        index = _B58_ALPHABET.find(char)
+        if index < 0:
+            raise ValueError(f"'{char}' is not a base58 character")
+        num = num * 58 + index
+    try:
+        raw = num.to_bytes(25, "big")
+    except OverflowError:
+        raise ValueError("too long for a Tron address")
+    payload, checksum = raw[:-4], raw[-4:]
+    if hashlib.sha256(hashlib.sha256(payload).digest()).digest()[:4] != checksum:
+        raise ValueError("checksum does not match (likely a typo)")
+    if payload[0] != 0x41:
+        raise ValueError("not a Tron mainnet address (should start with T)")
+    return payload
+
+
+def _tron_account(base_url, address):
+    data = _post_json(f"{base_url}/wallet/getaccount", {"address": address, "visible": True})
+    if not data:
+        # An unknown or never-activated account comes back as {}. Treat it as a
+        # failed read, not a zero balance, so a wrong address is visible.
+        raise FetchError(f"Tron account not found from {base_url} (not activated, or wrong address)")
+    return data
+
+
+def _trx_rpc(base_url, address):
+    """Liquid (spendable) TRX. Staked TRX sits in frozenV2 and is excluded."""
+    data = _tron_account(base_url, address)
+    # Tron omits zero-valued fields, so an activated account with no TRX has no 'balance'.
+    sun = int(data.get("balance", 0))
+    if sun < 0:
+        raise FetchError(f"Negative TRX balance from {base_url}: {sun}")
+    return Decimal(sun) / Decimal(10**6)
+
+
+def _trx_trongrid(address):
+    return _trx_rpc(TRON_ENDPOINTS[0], address)
+
+
+def _trx_publicnode(address):
+    return _trx_rpc(TRON_ENDPOINTS[1], address)
+
+
+# TRC-20 token contracts on Tron mainnet. These are public token contracts, not
+# wallets. sensitive-data-guard:allow
+_TRC20_CONTRACTS = {
+    "USDT": ("TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t", 6),
 }
 
-SUPPORTED_ASSETS = sorted(FETCHERS)
+
+def _trc20_rpc(base_url, token_contract, wallet_address, decimals):
+    # balanceOf takes the 20-byte account id (without the 0x41 prefix), ABI-padded.
+    param = tron_address_bytes(wallet_address)[1:].hex().zfill(64)
+    data = _post_json(f"{base_url}/wallet/triggerconstantcontract", {
+        "owner_address": wallet_address,
+        "contract_address": token_contract,
+        "function_selector": "balanceOf(address)",
+        "parameter": param,
+        "visible": True,
+    })
+    if not (data.get("result") or {}).get("result"):
+        raise FetchError(f"TRC-20 balanceOf failed from {base_url}: {data.get('result')}")
+    raw = (data.get("constant_result") or [""])[0]
+    if not raw:
+        raise FetchError(f"TRC-20 balanceOf returned empty from {base_url}")
+    return Decimal(int(raw, 16)) / Decimal(10 ** decimals)
 
 
-def get_balance(asset, address):
+def _make_trc20_fetchers(symbol):
+    contract, decimals = _TRC20_CONTRACTS[symbol]
+
+    def _primary(address):
+        return _trc20_rpc(TRON_ENDPOINTS[0], contract, address, decimals)
+
+    def _fallback(address):
+        return _trc20_rpc(TRON_ENDPOINTS[1], contract, address, decimals)
+
+    _primary.__name__ = f"_{symbol.lower()}_trc20_trongrid"
+    _fallback.__name__ = f"_{symbol.lower()}_trc20_publicnode"
+    return [_primary, _fallback]
+
+
+# ---------------------------------------------------------------------------
+# Chains. Each wallet is an (asset, chain) pair: the same asset can live on more
+# than one chain (USDT on Ethereum and on Tron). Chains are shown and configured
+# by their short network code; the full names are accepted as aliases.
+
+CHAIN_ALIASES = {
+    "BTC": "BTC", "BITCOIN": "BTC",
+    "ETH": "ETH", "ETHEREUM": "ETH",
+    "SOL": "SOL", "SOLANA": "SOL",
+    "XRP": "XRP", "XRPL": "XRP",
+    "LTC": "LTC", "LITECOIN": "LTC",
+    "TRX": "TRX", "TRON": "TRX",
+}
+
+# The chain an asset is on when the config does not say. USDT and USDC default to
+# Ethereum, so configs written before chains existed keep working unchanged.
+DEFAULT_CHAIN = {
+    "BTC": "BTC",
+    "ETH": "ETH",
+    "SOL": "SOL",
+    "XRP": "XRP",
+    "LTC": "LTC",
+    "TRX": "TRX",
+    "USDC": "ETH",
+    "USDT": "ETH",
+}
+
+FETCHERS = {
+    ("BTC", "BTC"): [_btc_mempool_space, _btc_blockstream],
+    ("ETH", "ETH"): [_eth_publicnode, _eth_drpc],
+    ("SOL", "SOL"): [_sol_mainnet, _sol_publicnode],
+    ("XRP", "XRP"): [_xrp_cluster, _xrp_ripple_s1],
+    ("LTC", "LTC"): [_ltc_litecoinspace, _ltc_blockcypher],
+    ("USDC", "ETH"): _make_erc20_fetchers("USDC"),
+    ("USDT", "ETH"): _make_erc20_fetchers("USDT"),
+    ("TRX", "TRX"): [_trx_trongrid, _trx_publicnode],
+    ("USDT", "TRX"): _make_trc20_fetchers("USDT"),
+}
+
+SUPPORTED_ASSETS = sorted({asset for asset, _ in FETCHERS})
+SUPPORTED_PAIRS = sorted(FETCHERS)
+
+
+def normalise_chain(chain):
+    """Return the chain code for a code or alias ('tron' -> 'TRX'), or None if unknown."""
+    return CHAIN_ALIASES.get(str(chain).strip().upper())
+
+
+def get_balance(asset, address, chain=None):
     """Return the balance as Decimal, trying primary then fallback endpoint.
 
-    Raises FetchError if every endpoint fails.
+    chain defaults to the asset's usual chain (USDT -> ETH). Raises FetchError
+    if every endpoint fails.
     """
+    chain = chain or DEFAULT_CHAIN[asset]
     errors = []
-    for fetcher in FETCHERS[asset]:
+    for fetcher in FETCHERS[(asset, chain)]:
         try:
             return fetcher(address)
         except Exception as exc:  # noqa: BLE001 - record and try the fallback
             errors.append(f"{fetcher.__name__}: {exc}")
-    raise FetchError(f"{asset} {address}: all endpoints failed: {'; '.join(errors)}")
+    raise FetchError(f"{asset} on {chain} {address}: all endpoints failed: {'; '.join(errors)}")
 
 
 # ---------------------------------------------------------------------------
@@ -202,8 +339,9 @@ def get_balance(asset, address):
 # The ETH JSON-RPC endpoints the balance fetchers already use, reused here.
 ETH_RPC_ENDPOINTS = ("https://ethereum-rpc.publicnode.com", "https://eth.drpc.org")
 
-# Assets that live on Ethereum and therefore share an address's nonce queue.
-EVM_ASSETS = frozenset({"ETH", *_ERC20_CONTRACTS})
+# Chains whose wallets share an address's nonce queue (Ethereum only). Keyed by
+# chain, not asset, so USDT on Tron is never sent to the Ethereum nonce check.
+EVM_CHAINS = frozenset({"ETH"})
 
 
 def _eth_nonce(url, address, block_tag):

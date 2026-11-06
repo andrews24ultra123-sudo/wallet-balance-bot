@@ -34,9 +34,16 @@ pending_alert:
   # listed below. Set explicit addresses only if you need to override that.
   addresses: []
 
-# One entry per address to watch. Labels must be unique; thresholds are in the
-# asset's main unit (BTC, ETH, SOL, XRP, LTC). XRP balances are reported as
-# spendable (total minus the XRPL reserve).
+# One entry per asset to watch. Labels must be unique; thresholds are in the
+# asset's main unit (BTC, ETH, SOL, XRP, LTC, TRX, USDT, USDC). XRP balances are
+# reported as spendable (total minus the XRPL reserve); TRX as liquid (staked TRX
+# excluded).
+#
+# `chain` is optional and shown in the Chain column. Supported: BTC, ETH, SOL,
+# XRP and LTC (native), TRX (native TRX and USDT), and ETH for USDT and USDC.
+# Full names work too (tron, ethereum). Left out, USDT and USDC mean Ethereum
+# and every other asset its own chain. An asset on two chains needs two entries;
+# in Telegram, pick one by adding the chain, e.g. /setthreshold USDT TRX 2000.
 wallets:
   - label: BTC hot wallet
     asset: BTC
@@ -58,3 +65,18 @@ wallets:
     asset: LTC
     address: ltc1q...
     threshold: 20
+  - label: TRX hot wallet
+    asset: TRX
+    chain: TRX
+    address: T...
+    threshold: 50
+  - label: USDT hot wallet
+    asset: USDT
+    chain: ETH
+    address: "0x..."
+    threshold: 30000
+  - label: USDT TRX hot wallet
+    asset: USDT
+    chain: TRX
+    address: T...
+    threshold: 2000
