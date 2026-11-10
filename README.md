@@ -81,13 +81,41 @@ journalctl -u wallet-bot -f           # watch it come up; expect "bot online" in
 ```
 
 ### Updating
-Edit locally, push to GitHub, then on the VPS:
+Edit locally, run the tests, push to GitHub, then on the VPS as root (hPanel > VPS > Browser terminal opens at `root@<host>:~#`). The running bot is untouched until the restart in step 5.
+
 ```bash
-cd /opt/wallet-balance-bot && git pull && systemctl restart wallet-bot
+# 1. Go to the bot and note the current commit: this is your rollback point
+cd /opt/wallet-balance-bot
+git log --oneline -1
+
+# 2. Back up the files git does not hold (time-stamped, so two updates in a day never overwrite each other)
+STAMP=$(date +%Y%m%d-%H%M); cp config.yaml config.yaml.bak-$STAMP; cp state.json state.json.bak-$STAMP; echo $STAMP
+
+# 3. Pull the new code (expect "Fast-forward")
+git pull
+
+# 3a. Only if requirements.txt is in the pull's file list
+venv/bin/pip install -r requirements.txt
+
+# 4. Read-only test of the new code against the live config (stop on "Config error" or "[FAIL]")
+venv/bin/python -m bot.main --config config.yaml --check
+
+# 5. Go live and confirm
+systemctl restart wallet-bot
+sleep 10; systemctl is-active wallet-bot
+journalctl -u wallet-bot --since "5 minutes ago" --no-pager | grep -E "Starting bot|Error|Traceback"
 ```
-If `requirements.txt` changed in the pull, install the new deps first:
+Expect `active`, one `Starting bot: N wallets` line and no `Error` or `Traceback`. Then in Telegram: "Wallet balance bot online", then `/balances`.
+
+If an update also needs a config change, make it after step 3 and before step 4, so the `--check` tests the code and the config together. Do not use `/setthreshold` or `/settarget` between steps 3 and 5: they rewrite `config.yaml`.
+
+Rollback (puts the old code and config back and keeps the current config aside; use the commit from step 1 and the stamp from step 2):
 ```bash
-cd /opt/wallet-balance-bot && git pull && venv/bin/pip install -r requirements.txt && systemctl restart wallet-bot
+cd /opt/wallet-balance-bot && cp config.yaml config.yaml.rolledback && git checkout <commit> && cp config.yaml.bak-<stamp> config.yaml && systemctl restart wallet-bot
+```
+A rollback leaves a detached checkout, so a plain `git pull` no longer works. Come forward again with:
+```bash
+cd /opt/wallet-balance-bot && git checkout main && git pull && cp config.yaml.rolledback config.yaml && systemctl restart wallet-bot
 ```
 
 ### Day-to-day
